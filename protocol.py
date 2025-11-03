@@ -10,6 +10,7 @@ MSG_TYPE_JOIN_RESP = 1
 MSG_TYPE_CLAIM_REQ = 2
 MSG_TYPE_BOARD_SNAPSHOT = 3 
 MSG_TYPE_GAME_OVER = 4
+MSG_TYPE_LEAVE = 5
 
 HEADER_FORMAT = "!4s B B H I Q"  # protocol_id, version, msg_type, length, seq_num, timestamp
 HEADER_SIZE = 20

@@ -5,7 +5,7 @@ import random
 from protocol import (
     create_header, parse_header,
     MSG_TYPE_JOIN_REQ, MSG_TYPE_JOIN_RESP,
-    MSG_TYPE_CLAIM_REQ, MSG_TYPE_BOARD_SNAPSHOT,
+    MSG_TYPE_CLAIM_REQ, MSG_TYPE_BOARD_SNAPSHOT,MSG_TYPE_LEAVE,
     unpack_grid_snapshot
 )
 
@@ -81,5 +81,10 @@ while time.time() - start_time < 30:  # run for 30 seconds
     except socket.timeout:
         continue
 
+# send leave message to server before closing
+leave_msg = create_header(MSG_TYPE_LEAVE, seq_num, 0)
+client_socket.sendto(leave_msg, (SERVER_IP, SERVER_PORT))
+print("[INFO] Sent LEAVE message to server")
+
 client_socket.close()
-print("[INFO] Client finished sending claims and closed connection.")
+print("[INFO] Client closed connection.")
