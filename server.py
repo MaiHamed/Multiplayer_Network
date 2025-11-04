@@ -21,7 +21,7 @@ grid_state = [[0 for _ in range(GRID_COLS)] for _ in range(GRID_ROWS)]
 
 # Timing for snapshot broadcasts
 last_snapshot_time = 0
-SNAPSHOT_INTERVAL = 0.5 
+SNAPSHOT_INTERVAL = 0.033 
 
 print(f"Server running on {UDP_IP}:{UDP_PORT}")
 

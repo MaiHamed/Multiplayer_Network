@@ -31,14 +31,30 @@ def parse_header(data):
         'timestamp': timestamp
     }
 
-
 def pack_grid_snapshot(grid):
-    return b"".join(bytes(row) for row in grid)
+    packed = bytearray()
+    rows = len(grid)
+    cols = len(grid[0])
+
+    for r in range(rows):
+        for c in range(0, cols, 2):  
+            cell1 = grid[r][c] & 0x0F  
+            cell2 = grid[r][c+1] & 0x0F 
+            packed_byte = (cell1 << 4) | cell2
+            packed.append(packed_byte)
+
+    return bytes(packed)  # total 200 bytes for 20x20 grid
+
 
 def unpack_grid_snapshot(payload, rows=20, cols=20):
-    grid = []
-    for i in range(rows):
-        row_start = i * cols
-        row_end = row_start + cols
-        grid.append(list(payload[row_start:row_end]))
+    grid = [[0 for _ in range(cols)] for _ in range(rows)]
+    i = 0  # index in payload
+
+    for r in range(rows):
+        for c in range(0, cols, 2):
+            byte = payload[i]
+            grid[r][c] = (byte >> 4) & 0x0F 
+            grid[r][c+1] = byte & 0x0F       
+            i += 1
+
     return grid
