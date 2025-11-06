@@ -24,7 +24,6 @@ start_clients() {
         $CLIENT_CMD > client_${i}.log 2>&1 &
     done
 }
-
 stop_all() {
     echo "[INFO] Stopping server and clients..."
     pkill -f "server.py" || true
@@ -37,9 +36,6 @@ apply_netem() {
     sudo tc qdisc del dev $IFACE root 2>/dev/null || true
     case "$scenario" in
         baseline) ;;
-        loss2) sudo tc qdisc add dev $IFACE root netem loss 2% ;;
-        loss5) sudo tc qdisc add dev $IFACE root netem loss 5% ;;
-        delay100) sudo tc qdisc add dev $IFACE root netem delay 100ms ;;
     esac
 }
 
@@ -49,7 +45,6 @@ capture_traffic() {
     sudo tcpdump -i $IFACE -w "$OUTDIR/${scenario}.pcap" udp port 5005 > /dev/null 2>&1 &
     TCPDUMP_PID=$!
 }
-
 for scenario in "${SCENARIOS[@]}"; do
     echo "======================================"
     echo " Running Scenario: $scenario"
@@ -74,4 +69,3 @@ for scenario in "${SCENARIOS[@]}"; do
 done
 
 echo "[DONE] All tests completed. Results stored in $OUTDIR/"
-
