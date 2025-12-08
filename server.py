@@ -1,9 +1,11 @@
-# server.py - SR ARQ with snapshot_id for late-joining clients
+# server.py - Multiplayer Game Server with SR ARQ & RTT logging
+
 import socket
 import struct
 import time
 import select
 import threading
+import os
 from protocol import (
     create_header, pack_grid_snapshot, parse_header,
     MSG_TYPE_JOIN_REQ, MSG_TYPE_JOIN_RESP,
@@ -15,14 +17,14 @@ def current_time_ms():
     return int(time.time() * 1000)
 
 class GameServer:
-    def __init__(self, ip="127.0.0.1", port=5005):
-        self.ip = ip
+    def __init__(self, ip=None, port=5005):
+        self.ip = ip or os.environ.get("IP", "127.0.0.1")
         self.port = port
         self.server_socket = None
         self.clients = {}  # player_id -> (addr, last_seen)
         self.waiting_room_players = {}  # player_id -> addr
-        self.seq_num = 0  # overall seq num
-        self.snapshot_id = 0  # incremental snapshot ID
+        self.seq_num = 0
+        self.snapshot_id = 0
         self.grid_state = [[0]*20 for _ in range(20)]
         self.game_active = False
         self.min_players = 2
@@ -36,7 +38,7 @@ class GameServer:
         self.client_windows = {}  # player_id -> {seq_num: packet}
         self.client_timers = {}   # player_id -> {seq_num: timestamp}
         self.client_next_seq = {} # player_id -> next seq num
-        self.RTO = 200  # default RTO ms
+        self.RTO = 200  # ms
 
     # ==================== Server Start/Stop ====================
     def start(self):
@@ -54,9 +56,8 @@ class GameServer:
         self.waiting_room_players.clear()
         print("[INFO] Server stopped.")
 
-    # ==================== SR ARQ Sender ====================
+    # ==================== SR ARQ ====================
     def _sr_send(self, player_id, msg_type, payload=b''):
-        """Send a packet with SR ARQ reliability per client"""
         if player_id not in self.client_next_seq:
             self.client_next_seq[player_id] = 0
             self.client_windows[player_id] = {}
@@ -79,7 +80,6 @@ class GameServer:
             print(f"[DROPPED] to player {player_id}, window full")
 
     def _retransmit(self):
-        """Check all client timers and retransmit if RTO exceeded"""
         now = current_time_ms()
         for pid in list(self.client_timers.keys()):
             timers = self.client_timers[pid]
@@ -108,7 +108,7 @@ class GameServer:
                     self._send_snapshot()
                     self.last_snapshot_time = time.time()
 
-                # handle retransmissions
+                # retransmissions
                 self._retransmit()
             except:
                 time.sleep(0.01)
@@ -124,10 +124,8 @@ class GameServer:
         # Send ACK for reliability
         ack_packet = create_header(MSG_TYPE_ACK, seq, 0)
         self.server_socket.sendto(ack_packet, addr)
-        print(f"[SEND ACK] seq={seq}, to={addr}")
 
         if msg_type == MSG_TYPE_JOIN_REQ:
-            # Assign new player_id
             new_pid = 1
             while new_pid in self.waiting_room_players: new_pid += 1
             self.waiting_room_players[new_pid] = addr
@@ -158,9 +156,17 @@ class GameServer:
                 window = self.client_windows.get(player_id, {})
                 timers = self.client_timers.get(player_id, {})
                 if seq in window:
+                    send_time = timers[seq]
+                    rtt = current_time_ms() - send_time
+                    if 'rtt_log' not in self.stats:
+                        self.stats['rtt_log'] = {}
+                    if player_id not in self.stats['rtt_log']:
+                        self.stats['rtt_log'][player_id] = []
+                    self.stats['rtt_log'][player_id].append(rtt)
+
                     del window[seq]
                     del timers[seq]
-                    print(f"[ACK RECEIVED] from player {player_id} seq={seq}")
+                    print(f"[ACK RECEIVED] from player {player_id} seq={seq}, RTT={rtt}ms")
 
     # ==================== Helper ====================
     def _addr_to_pid(self, addr):
@@ -202,3 +208,17 @@ class GameServer:
         for pid in self.clients.keys():
             self._sr_send(pid, MSG_TYPE_GAME_OVER)
         print("[GAME OVER]")
+
+# ==================== MAIN ====================
+if __name__ == "__main__":
+    server = GameServer()
+    server.start()
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        server.stop()
+        for pid, rtts in server.stats.get('rtt_log', {}).items():
+            if rtts:
+                avg_rtt = sum(rtts)/len(rtts)
+                print(f"[SUMMARY] Player {pid} Average RTT: {avg_rtt:.2f} ms over {len(rtts)} ACKs")
