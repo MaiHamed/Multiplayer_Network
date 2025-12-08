@@ -1,39 +1,35 @@
-# server.py - Add player status updates
+# server.py - SR ARQ with snapshot_id for late-joining clients
 import socket
 import struct
 import time
 import select
 import threading
-import tkinter as tk
 from protocol import (
     create_header, pack_grid_snapshot, parse_header,
     MSG_TYPE_JOIN_REQ, MSG_TYPE_JOIN_RESP,
-    MSG_TYPE_CLAIM_REQ, MSG_TYPE_LEAVE, MSG_TYPE_BOARD_SNAPSHOT
+    MSG_TYPE_CLAIM_REQ, MSG_TYPE_LEAVE, MSG_TYPE_BOARD_SNAPSHOT,
+    MSG_TYPE_ACK, MSG_TYPE_GAME_START, MSG_TYPE_GAME_OVER
 )
+
+def current_time_ms():
+    return int(time.time() * 1000)
 
 class GameServer:
     def __init__(self, ip="127.0.0.1", port=5005):
         self.ip = ip
         self.port = port
-        
         self.server_socket = None
-        self.clients = {}  
-        self.seq_num = 0
-        self.snapshot_id = 0
-
-        # Waiting room variables
-        self.waiting_room_players = {} 
+        self.clients = {}  # player_id -> (addr, last_seen)
+        self.waiting_room_players = {}  # player_id -> addr
+        self.seq_num = 0  # overall seq num
+        self.snapshot_id = 0  # incremental snapshot ID
+        self.grid_state = [[0]*20 for _ in range(20)]
         self.game_active = False
         self.min_players = 2
-        
-        # Grid state: 0=unclaimed, player_id=claimed
-        self.grid_state = [[0 for _ in range(20)] for _ in range(20)]
         self.running = False
-        self.server_thread = None
-        
-        # Snapshot timing
-        self.SNAPSHOT_INTERVAL = 0.033  # ~30Hz
+        self.SNAPSHOT_INTERVAL = 0.033
         self.last_snapshot_time = time.time()
+<<<<<<< HEAD
         
         # Statistics
         self.stats = {
@@ -68,76 +64,95 @@ class GameServer:
         self.gui.on_connect_click = self.start
         self.gui.on_disconnect_click = self.stop
     
+=======
+        self.stats = {'sent':0,'received':0,'dropped':0,'client_count':0}
+
+        # SR ARQ per client
+        self.N = 6
+        self.client_windows = {}  # player_id -> {seq_num: packet}
+        self.client_timers = {}   # player_id -> {seq_num: timestamp}
+        self.client_next_seq = {} # player_id -> next seq num
+        self.RTO = 200  # default RTO ms
+
+    # ==================== Server Start/Stop ====================
+>>>>>>> 40126e1ecaa522e46e5dbf044e06d7ad0b8cd395
     def start(self):
-        """Start the server"""
-        try:
-            self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 65536)
-            self.server_socket.setblocking(0)
-            self.server_socket.bind((self.ip, self.port))
-            
-            self.running = True
-            self.server_thread = threading.Thread(target=self._server_loop)
-            self.server_thread.daemon = True
-            self.server_thread.start()
-            
-            self.gui.log_message(f"Server started on {self.ip}:{self.port}", "success")
-            self.gui.update_player_info("Server", True)
-            
-            return True
-            
-        except Exception as e:
-            self.gui.log_message(f"Server start error: {e}", "error")
-            return False
-    
+        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.server_socket.setblocking(0)
+        self.server_socket.bind((self.ip,self.port))
+        self.running = True
+        threading.Thread(target=self._server_loop, daemon=True).start()
+        print(f"[INFO] Server started at {self.ip}:{self.port}")
+
     def stop(self):
-        """Stop the server"""
         self.running = False
-        if self.server_socket:
-            self.server_socket.close()
-            self.server_socket = None
-        
-        # Clear clients
+        if self.server_socket: self.server_socket.close()
         self.clients.clear()
-        
-        self.gui.log_message("Server stopped", "info")
-        self.gui.update_player_info("Server", False)
-        self.gui.update_players(self.clients)
-        self.stats['client_count'] = 0
-        self.gui.update_stats(self.stats)
-    
+        self.waiting_room_players.clear()
+        print("[INFO] Server stopped.")
+
+    # ==================== SR ARQ Sender ====================
+    def _sr_send(self, player_id, msg_type, payload=b''):
+        """Send a packet with SR ARQ reliability per client"""
+        if player_id not in self.client_next_seq:
+            self.client_next_seq[player_id] = 0
+            self.client_windows[player_id] = {}
+            self.client_timers[player_id] = {}
+
+        next_seq = self.client_next_seq[player_id]
+        window = self.client_windows[player_id]
+
+        if len(window) < self.N:
+            packet = create_header(msg_type, next_seq, len(payload)) + payload
+            addr = self.clients[player_id][0]
+            self.server_socket.sendto(packet, addr)
+            window[next_seq] = packet
+            self.client_timers[player_id][next_seq] = current_time_ms()
+            self.client_next_seq[player_id] += 1
+            self.stats['sent'] += 1
+            print(f"[SEND] to player {player_id} seq={next_seq}, type={msg_type}, window={list(window.keys())}")
+        else:
+            self.stats['dropped'] += 1
+            print(f"[DROPPED] to player {player_id}, window full")
+
+    def _retransmit(self):
+        """Check all client timers and retransmit if RTO exceeded"""
+        now = current_time_ms()
+        for pid in list(self.client_timers.keys()):
+            timers = self.client_timers[pid]
+            window = self.client_windows[pid]
+            addr = self.clients.get(pid, (None,))[0]
+            if not addr: continue
+            for seq, ts in list(timers.items()):
+                if now - ts >= self.RTO:
+                    self.server_socket.sendto(window[seq], addr)
+                    timers[seq] = now
+                    self.stats['sent'] += 1
+                    print(f"[RETRANSMIT] to player {pid} seq={seq}")
+
+    # ==================== Server Loop ====================
     def _server_loop(self):
-        """Main server loop"""
         while self.running:
             try:
-                ready = select.select([self.server_socket], [], [], 0.1)
-                
-                if ready[0]:
-                    try:
-                        data, addr = self.server_socket.recvfrom(1024)
-                        if len(data) < 22:
-                            continue
-                        
-                        self._handle_message(data, addr)
-                        
-                    except BlockingIOError:
-                        pass
-                    except Exception as e:
-                        self.gui.log_message(f"Receive error: {e}", "error")
-                
-                # Send periodic snapshots
-                current_time = time.time()
-                if self.clients and current_time - self.last_snapshot_time >= self.SNAPSHOT_INTERVAL:
+                ready, _, _ = select.select([self.server_socket], [], [], 0.01)
+                if ready:
+                    data, addr = self.server_socket.recvfrom(2048)
+                    if len(data) < 22: continue
+                    self._handle_message(data, addr)
+
+                # periodic snapshot
+                if self.clients and time.time() - self.last_snapshot_time >= self.SNAPSHOT_INTERVAL:
                     self._send_snapshot()
-                    self.last_snapshot_time = current_time
-                    
-            except Exception as e:
-                if self.running:
-                    self.gui.log_message(f"Server loop error: {e}", "error")
-                time.sleep(0.1)
-    
+                    self.last_snapshot_time = time.time()
+
+                # handle retransmissions
+                self._retransmit()
+            except:
+                time.sleep(0.01)
+
+    # ==================== Handle Messages ====================
     def _handle_message(self, data, addr):
+<<<<<<< HEAD
         try:
             header = parse_header(data)
             msg_type = header["msg_type"]
@@ -232,88 +247,92 @@ class GameServer:
         except Exception as e:
             self.gui.log_message(f"Message handling error: {e}", "error")
     
+=======
+        header = parse_header(data)
+        msg_type = header["msg_type"]
+        seq = header["seq_num"]
+        self.stats['received'] += 1
+        print(f"[RECEIVED] seq={seq}, type={msg_type}, from={addr}")
+
+        # Send ACK for reliability
+        ack_packet = create_header(MSG_TYPE_ACK, seq, 0)
+        self.server_socket.sendto(ack_packet, addr)
+        print(f"[SEND ACK] seq={seq}, to={addr}")
+
+        if msg_type == MSG_TYPE_JOIN_REQ:
+            # Assign new player_id
+            new_pid = 1
+            while new_pid in self.waiting_room_players: new_pid += 1
+            self.waiting_room_players[new_pid] = addr
+            self.stats['client_count'] = len(self.waiting_room_players)
+            payload = struct.pack("!B", new_pid)
+            self._sr_send(new_pid, MSG_TYPE_JOIN_RESP, payload)
+            self.seq_num += 1
+
+            if len(self.waiting_room_players) >= self.min_players and not self.game_active:
+                self._start_game()
+
+        elif msg_type == MSG_TYPE_CLAIM_REQ:
+            player_id = self._addr_to_pid(addr)
+            if player_id:
+                r, c = struct.unpack("!BB", data[22:24])
+                self.grid_state[r][c] = player_id
+                print(f"[CLAIM] player {player_id} -> cell ({r},{c})")
+
+        elif msg_type == MSG_TYPE_LEAVE:
+            player_id = self._addr_to_pid(addr)
+            if player_id:
+                self._remove_player(player_id)
+                print(f"[LEAVE] player {player_id}")
+
+        elif msg_type == MSG_TYPE_ACK:
+            player_id = self._addr_to_pid(addr)
+            if player_id:
+                window = self.client_windows.get(player_id, {})
+                timers = self.client_timers.get(player_id, {})
+                if seq in window:
+                    del window[seq]
+                    del timers[seq]
+                    print(f"[ACK RECEIVED] from player {player_id} seq={seq}")
+
+    # ==================== Helper ====================
+    def _addr_to_pid(self, addr):
+        for pid, a in self.clients.items():
+            if a[0] == addr:
+                return pid
+        for pid, a in self.waiting_room_players.items():
+            if a == addr:
+                return pid
+        return None
+
+    def _remove_player(self, player_id):
+        self.clients.pop(player_id, None)
+        self.client_windows.pop(player_id, None)
+        self.client_timers.pop(player_id, None)
+        self.client_next_seq.pop(player_id, None)
+
+    # ==================== Snapshot ====================
+>>>>>>> 40126e1ecaa522e46e5dbf044e06d7ad0b8cd395
     def _send_snapshot(self):
-        """Send snapshot to all clients"""
-        try:
-            # Send ACTUAL player IDs
-            compatible_grid = [[0 for _ in range(20)] for _ in range(20)]
-            for r in range(20):
-                for c in range(20):
-                    compatible_grid[r][c] = self.grid_state[r][c]
-            
-            snapshot_bytes = pack_grid_snapshot(compatible_grid)
-            payload_len = len(snapshot_bytes)
-            
-            # Send to all active clients
-            sent_count = 0
-            for pid, (addr, last_seen) in list(self.clients.items()):
-                try:
-                    msg = create_header(MSG_TYPE_BOARD_SNAPSHOT, self.seq_num, payload_len, self.snapshot_id) + snapshot_bytes
-                    self.server_socket.sendto(msg, addr)
-                    sent_count += 1
-                    
-                    # Update last seen time
-                    self.clients[pid] = (addr, time.time())
-                    
-                    # Log for testing
-                    server_ts_ms = int(time.time() * 1000)
-                    print(f"LOG {pid} {self.snapshot_id} {self.seq_num} {server_ts_ms} {server_ts_ms} 0.0 0.0 0.0")
-                    
-                except Exception as e:
-                    self.gui.log_message(f"Failed to send to player {pid}: {e}", "error")
-            
-            if sent_count > 0:
-                self.stats['sent'] += sent_count
-                self.snapshot_id += 1
-                self.seq_num += 1
-                
-                # Update GUI
-                self.gui.update_snapshot(self.snapshot_id)
-                self.gui.update_stats(self.stats)
-                
-                if self.snapshot_id % 10 == 0:
-                    self.gui.log_message(f"Snapshot {self.snapshot_id} sent to {sent_count} client(s)", "info")
-        
-        except Exception as e:
-            self.gui.log_message(f"Snapshot error: {e}", "error")
-    
-    def start_gui(self):
-        """Start the GUI"""
-        self.gui.run()
+        snapshot_bytes = pack_grid_snapshot(self.grid_state)
+        payload = struct.pack("!I", self.snapshot_id) + snapshot_bytes
+        for pid in self.clients.keys():
+            self._sr_send(pid, MSG_TYPE_BOARD_SNAPSHOT, payload)
+        self.snapshot_id += 1
+        print(f"[SNAPSHOT] id={self.snapshot_id}")
 
+    # ==================== Start Game ====================
     def _start_game(self):
-        """Start the game with waiting room players"""
         self.game_active = True
-        self.clients = self.waiting_room_players.copy()  # Move to active players
+        self.clients.update(self.waiting_room_players)
         self.waiting_room_players.clear()
-        
-        self.gui.log_message(f"Game started with {len(self.clients)} players!", "success")
-        self.gui.log_message("Players: " + ", ".join([f"Player {pid}" for pid in self.clients.keys()]), "info")
-        
-        # Send game start message to all clients
-        for pid, addr in self.clients.items():
-            try:
-                # You might want to add a MSG_TYPE_GAME_START message type
-                start_msg = create_header(4, self.seq_num, 0)  # Using MSG_TYPE_GAME_OVER as game start for now
-                self.server_socket.sendto(start_msg, addr)
-            except Exception as e:
-                self.gui.log_message(f"Failed to send start to player {pid}: {e}", "error")
-        
-        self.seq_num += 1
+        for pid in self.clients.keys():
+            self._sr_send(pid, MSG_TYPE_GAME_START)
+        print("[GAME STARTED]")
 
-
-# Main execution
-if __name__ == "__main__":
-    import sys
-    
-    if len(sys.argv) > 1 and sys.argv[1] == "--no-gui":
-        server = GameServer()
-        server.start()
-        try:
-            while True:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            server.stop()
-    else:
-        server = GameServer()
-        server.start_gui()
+    # ==================== End Game ====================
+    def end_game(self):
+        self.game_active = False
+        for pid in self.clients.keys():
+            self._sr_send(pid, MSG_TYPE_GAME_OVER)
+        print("[GAME OVER]")

@@ -1,12 +1,11 @@
 #!/bin/bash
 # Automated test runner for Multiplayer_Network
-# ---------------------------------------------
-IFACE="lo"                            # Change if not using loopback
+IFACE="lo"
 SERVER_CMD="python3 ../server.py"
 CLIENT_CMD="python3 ../client.py"
 OUTDIR="./results"
-RUN_TIME=30                           # seconds per test
-NUM_CLIENTS=4                         # clients per test
+RUN_TIME=30
+NUM_CLIENTS=4
 SCENARIOS=("baseline" "loss2" "loss5" "delay100")
 
 mkdir -p "$OUTDIR"
@@ -24,10 +23,10 @@ start_clients() {
         $CLIENT_CMD > client_${i}.log 2>&1 &
     done
 }
+
 stop_all() {
     echo "[INFO] Stopping server and clients..."
-    pkill -f "server.py" || true
-    pkill -f "client.py" || true
+    taskkill //F //IM python.exe //T >nul 2>&1 || true
 }
 
 apply_netem() {
@@ -36,6 +35,9 @@ apply_netem() {
     sudo tc qdisc del dev $IFACE root 2>/dev/null || true
     case "$scenario" in
         baseline) ;;
+        loss2) sudo tc qdisc add dev $IFACE root netem loss 2% ;;
+        loss5) sudo tc qdisc add dev $IFACE root netem loss 5% ;;
+        delay100) sudo tc qdisc add dev $IFACE root netem delay 100ms ;;
     esac
 }
 
@@ -45,6 +47,7 @@ capture_traffic() {
     sudo tcpdump -i $IFACE -w "$OUTDIR/${scenario}.pcap" udp port 5005 > /dev/null 2>&1 &
     TCPDUMP_PID=$!
 }
+
 for scenario in "${SCENARIOS[@]}"; do
     echo "======================================"
     echo " Running Scenario: $scenario"
