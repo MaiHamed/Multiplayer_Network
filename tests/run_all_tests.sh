@@ -1,45 +1,69 @@
 #!/bin/bash
 
-# =============================
-# Run server and clients for test
-# =============================
+# ===============================
+# run_all_tests.sh
+# Git Bash friendly test runner
+# ===============================
 
-# Function to start Python script and return PID
-start_python() {
-    local script_path=$1
-    echo "Starting $script_path..."
-    cmd.exe /C "start /B python \"$script_path\"" 
-}
-
-# Paths (adjust if your scripts move)
+# Paths (relative to the tests folder)
 SERVER_PATH="../server.py"
 CLIENT_PATH="../client.py"
 
-# Start server
-echo "Starting server..."
-start_python "$SERVER_PATH"
-SERVER_PID=$!
-echo "Server started."
+# Test configuration
+NUM_CLIENTS=4
+TEST_DURATION=20  # seconds
 
-# Give server some time to initialize
+# Arrays to store PIDs
+SERVER_PID=0
+CLIENT_PIDS=()
+
+# Function to start a Python script in the background and log output
+start_python() {
+    local script_path=$1
+    local log_file=$(basename "$script_path" .py).log
+    echo "Starting $script_path..."
+    python "$script_path" > "../tests/$log_file" 2>&1 &
+    echo $!  # Return PID
+}
+
+# ===============================
+# Start server
+# ===============================
+SERVER_PID=$(start_python "$SERVER_PATH")
+echo "Server PID: $SERVER_PID"
+
+# Give the server a moment to start
 sleep 2
 
+# ===============================
 # Start clients
-NUM_CLIENTS=4
-for i in $(seq 1 $NUM_CLIENTS); do
-    echo "Starting client $i..."
-    start_python "$CLIENT_PATH"
+# ===============================
+for ((i=1; i<=NUM_CLIENTS; i++)); do
+    CLIENT_PID=$(start_python "$CLIENT_PATH")
+    CLIENT_PIDS+=($CLIENT_PID)
+    echo "Started client $i with PID $CLIENT_PID"
     sleep 1
 done
 
-# Run test for 20 seconds
-TEST_DURATION=20
-echo "Running test for $TEST_DURATION seconds..."
+# ===============================
+# Let the test run
+# ===============================
+echo "Test running for $TEST_DURATION seconds..."
 sleep $TEST_DURATION
 
-# Kill server and clients
-echo "Stopping server and clients..."
-# On Windows, we can use taskkill
-taskkill //F //IM python.exe //T > /dev/null 2>&1
+# ===============================
+# Cleanup
+# ===============================
+echo "Stopping clients..."
+for pid in "${CLIENT_PIDS[@]}"; do
+    kill $pid 2>/dev/null
+done
 
-echo "Test finished."
+echo "Stopping server..."
+kill $SERVER_PID 2>/dev/null
+
+echo "Test completed. Check logs in the tests/ folder:"
+echo " - server.log"
+for ((i=1; i<=NUM_CLIENTS; i++)); do
+    echo " - client${i}.log"
+done
