@@ -1,71 +1,51 @@
 #!/bin/bash
-# Automated test runner for Multiplayer_Network
-# ---------------------------------------------
-IFACE="lo"                            # Change if not using loopback
-SERVER_CMD="python3 ../server.py"
-CLIENT_CMD="python3 ../client.py"
-OUTDIR="./results"
-RUN_TIME=30                           # seconds per test
-NUM_CLIENTS=4                         # clients per test
-SCENARIOS=("baseline" "loss2" "loss5" "delay100")
+# test_game_advanced.sh
+# Advanced test scenario for SR ARQ game
 
-mkdir -p "$OUTDIR"
+# ------------------------------
+# CONFIGURATION
+SERVER_SCRIPT="server.py"
+CLIENT_SCRIPT="client.py"
+NUM_CLIENTS=4
+TEST_DURATION=20  # seconds
+PACKET_DROP_RATE=0.1  # 10% simulated packet loss
+PACKET_DELAY_MAX=0.05 # max delay in seconds
 
-start_server() {
-    echo "[INFO] Starting server..."
-    $SERVER_CMD > server.log 2>&1 &
-    SERVER_PID=$!
-    sleep 1
-}
+# ------------------------------
+# Start server
+echo "Starting server..."
+python $SERVER_SCRIPT &
+SERVER_PID=$!
+echo "Server PID: $SERVER_PID"
+sleep 1  # give server time to start
 
-start_clients() {
-    echo "[INFO] Launching $NUM_CLIENTS clients..."
-    for i in $(seq 1 $NUM_CLIENTS); do
-        $CLIENT_CMD > client_${i}.log 2>&1 &
-    done
-}
-stop_all() {
-    echo "[INFO] Stopping server and clients..."
-    pkill -f "server.py" || true
-    pkill -f "client.py" || true
-}
-
-apply_netem() {
-    local scenario=$1
-    echo "[INFO] Applying netem profile: $scenario"
-    sudo tc qdisc del dev $IFACE root 2>/dev/null || true
-    case "$scenario" in
-        baseline) ;;
-    esac
-}
-
-capture_traffic() {
-    local scenario=$1
-    echo "[INFO] Capturing packets..."
-    sudo tcpdump -i $IFACE -w "$OUTDIR/${scenario}.pcap" udp port 5005 > /dev/null 2>&1 &
-    TCPDUMP_PID=$!
-}
-for scenario in "${SCENARIOS[@]}"; do
-    echo "======================================"
-    echo " Running Scenario: $scenario"
-    echo "======================================"
-
-    apply_netem "$scenario"
-    capture_traffic "$scenario"
-
-    start_server
-    start_clients
-
-    echo "[INFO] Running for $RUN_TIME seconds..."
-    sleep $RUN_TIME
-
-    stop_all
-    sudo kill $TCPDUMP_PID 2>/dev/null || true
-    sudo tc qdisc del dev $IFACE root 2>/dev/null || true
-
-    echo "[INFO] Logs and PCAP saved for scenario: $scenario"
-    mkdir -p "$OUTDIR/$scenario"
-    mv ./*.log "$OUTDIR/$scenario"/
+# ------------------------------
+# Start clients
+CLIENT_PIDS=()
+for i in $(seq 1 $NUM_CLIENTS); do
+    echo "Starting client $i..."
+    # pass drop/delay as args to client.py (modify client.py to accept them)
+    python $CLIENT_SCRIPT --no-gui --drop-rate $PACKET_DROP_RATE --max-delay $PACKET_DELAY_MAX &
+    CLIENT_PIDS+=($!)
+    sleep 0.5
 done
 
-echo "[DONE] All tests completed. Results stored in $OUTDIR/"
+# ------------------------------
+# Run the test
+echo "Test running for $TEST_DURATION seconds..."
+sleep $TEST_DURATION
+
+# ------------------------------
+# Stop clients
+echo "Stopping clients..."
+for pid in "${CLIENT_PIDS[@]}"; do
+    kill $pid
+done
+
+# ------------------------------
+# Stop server
+echo "Stopping server..."
+kill $SERVER_PID
+
+echo "Test complete!"
+echo "Check client and server logs for sent/received/dropped statistics."
