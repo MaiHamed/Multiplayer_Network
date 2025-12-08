@@ -14,6 +14,7 @@ MSG_TYPE_LEAVE = 5
 MSG_TYPE_GAME_START = 6    
 MSG_TYPE_GAME_OVER = 7   
 MSG_TYPE_WAITING_ROOM = 8 
+MSG_TYPE_GAME_SETTINGS = 9  # Add this with other message types
 
 HEADER_FORMAT = "!4s B B H H I Q"  # protocol_id, version, msg_type, length, snapshot_ID, seq_num, timestamp ,
 HEADER_SIZE = 22

@@ -47,6 +47,17 @@ class GameServer:
         from gui import GameGUI
         self.gui = GameGUI(title="Grid Game Server")
         self._setup_gui_callbacks()
+
+        self.allow_cell_stealing = True  # Default: allow stealing
+        
+        # Also add to stats for GUI:
+        self.stats = {
+            'sent': 0,
+            'received': 0,
+            'dropped': 0,
+            'client_count': 0,
+            'allow_stealing': True  # Add this
+        }
     
     def _setup_gui_callbacks(self):
         """Setup GUI button callbacks for server"""
@@ -127,7 +138,6 @@ class GameServer:
                 time.sleep(0.1)
     
     def _handle_message(self, data, addr):
-        """Handle incoming message"""
         try:
             header = parse_header(data)
             msg_type = header["msg_type"]
@@ -180,15 +190,26 @@ class GameServer:
                         row, col = struct.unpack("!BB", payload[:2])
                         if 0 <= row < 20 and 0 <= col < 20:
                             old_owner = self.grid_state[row][col]
-                            self.grid_state[row][col] = player_id
-                            self.gui.update_grid(self.grid_state)
-                            if old_owner == 0:
-                                self.gui.log_message(f"Player {player_id} claimed cell ({row},{col})", "info")
+                            
+                            # Check if stealing is allowed
+                            # Only allow claim if: cell is unclaimed OR stealing is enabled
+                            if old_owner == 0 or self.allow_cell_stealing:
+                                # Process the claim
+                                self.grid_state[row][col] = player_id
+                                self.gui.update_grid(self.grid_state)
+                                
+                                # Log the claim
+                                if old_owner == 0:
+                                    self.gui.log_message(f"Player {player_id} claimed cell ({row},{col})", "info")
+                                else:
+                                    self.gui.log_message(f"Player {player_id} stole cell ({row},{col}) from Player {old_owner}", "warning")
                             else:
-                                self.gui.log_message(f"Player {player_id} stole cell ({row},{col}) from Player {old_owner}", "warning")
-                
-                if player_id in self.clients:
-                    self.clients[player_id] = (addr, time.time())
+                                # Cell already claimed and stealing not allowed
+                                self.gui.log_message(f"Player {player_id} tried to claim owned cell ({row},{col}) - stealing disabled", "warning")
+                    
+                    # Update client's last seen time
+                    if player_id in self.clients:
+                        self.clients[player_id] = (addr, time.time())
             
             elif msg_type == MSG_TYPE_LEAVE:
                 # Remove client
@@ -207,7 +228,7 @@ class GameServer:
             
             # Update stats in GUI
             self.gui.update_stats(self.stats)
-            
+        
         except Exception as e:
             self.gui.log_message(f"Message handling error: {e}", "error")
     

@@ -3,17 +3,26 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import subprocess
 import sys
+<<<<<<< Updated upstream
 import threading
+=======
+import os  # Added this import
+>>>>>>> Stashed changes
 
 class Launcher:
     def __init__(self):
         self.root = tk.Tk()
+<<<<<<< Updated upstream
         self.root.title("Grid Game Network Launcher")
         self.root.geometry("600x550")
         
         self.server_process = None
         self.client_processes = []
         self.mode = None  # 'server' or 'client'
+=======
+        self.root.title("Grid Game Launcher")
+        self.root.geometry("400x350")  # Increased height
+>>>>>>> Stashed changes
         
         self.setup_ui()
     
@@ -22,6 +31,7 @@ class Launcher:
         main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         
         # Title
+<<<<<<< Updated upstream
         title = ttk.Label(main_frame, text="🎮 Grid Game Network", font=("Arial", 20, "bold"))
         title.grid(row=0, column=0, pady=(0, 10))
         
@@ -34,6 +44,31 @@ class Launcher:
         # Mode selection section
         mode_frame = ttk.LabelFrame(main_frame, text="Select Mode", padding="15")
         mode_frame.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=(0, 20))
+=======
+        title = ttk.Label(main_frame, text="Grid Game Network", font=("Arial", 16, "bold"))
+        title.grid(row=0, column=0, pady=(0, 15))
+        
+        # Description
+        desc = ttk.Label(main_frame, text="A networking game where players claim cells on a grid", 
+                        wraplength=350)
+        desc.grid(row=1, column=0, pady=(0, 20))
+        
+        # Stealing option
+        stealing_frame = ttk.Frame(main_frame)
+        stealing_frame.grid(row=2, column=0, pady=(0, 20))
+        
+        self.allow_stealing_var = tk.BooleanVar(value=True)  # Default: allow stealing
+        stealing_check = ttk.Checkbutton(
+            stealing_frame,
+            text="Allow players to claim already-claimed cells",
+            variable=self.allow_stealing_var
+        )
+        stealing_check.grid(row=0, column=0)
+        
+        # Buttons
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.grid(row=3, column=0)
+>>>>>>> Stashed changes
         
         # Mode explanation
         mode_desc = ttk.Label(mode_frame, 
@@ -76,6 +111,7 @@ class Launcher:
             width=20,
             state='normal'
         )
+<<<<<<< Updated upstream
         self.start_server_btn.grid(row=0, column=0, padx=(0, 10))
         
         self.server_status = ttk.Label(server_controls, text="Not running", foreground="red")
@@ -270,6 +306,51 @@ class Launcher:
         self.select_server_mode()
         
         # Start server
+=======
+        quit_btn.grid(row=3, column=0, pady=(20, 0))
+        
+        # Status label
+        self.status_var = tk.StringVar(value="Ready")
+        status_label = ttk.Label(main_frame, textvariable=self.status_var, foreground="green")
+        status_label.grid(row=4, column=0, pady=(10, 0))
+    
+    def start_server(self):
+        """Start the server with stealing option"""
+        self.status_var.set("Starting server...")
+        self.root.update()
+        
+        # Check if server.py exists
+        if not os.path.exists("server.py"):
+            self.status_var.set("Error: server.py not found!")
+            return
+        
+        # Get the stealing setting
+        allow_stealing = self.allow_stealing_var.get()
+        
+        # Pass as command line argument
+        if allow_stealing:
+            subprocess.Popen([sys.executable, "server.py"])
+        else:
+            subprocess.Popen([sys.executable, "server.py", "--no-stealing"])
+        
+        self.status_var.set(f"Server started (Stealing: {'ON' if allow_stealing else 'OFF'})")
+    
+    def start_client(self):
+        """Start the client"""
+        self.status_var.set("Starting client...")
+        self.root.update()
+        
+        # Check if client.py exists
+        if not os.path.exists("client.py"):
+            self.status_var.set("Error: client.py not found!")
+            return
+        
+        subprocess.Popen([sys.executable, "client.py"])
+        self.status_var.set("Client started!")
+    
+    def start_both(self):
+        """Start both server and client"""
+>>>>>>> Stashed changes
         self.start_server()
         
         # Wait for server to start, then launch clients
