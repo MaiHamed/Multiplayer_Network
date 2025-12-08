@@ -1,31 +1,28 @@
-# client.py - Multiplayer Game Client with SR ARQ & RTT logging
-
+# client.py - Updated with SR ARQ and waiting room support
 import socket
 import struct
 import time
 import threading
 import random
-import os
-
 from protocol import (
     create_header, parse_header,
     MSG_TYPE_JOIN_REQ, MSG_TYPE_JOIN_RESP,
     MSG_TYPE_CLAIM_REQ, MSG_TYPE_BOARD_SNAPSHOT, MSG_TYPE_LEAVE,
     MSG_TYPE_GAME_START, MSG_TYPE_GAME_OVER,
-    MSG_TYPE_ACK
+    unpack_grid_snapshot, MSG_TYPE_ACK
 )
 
 def current_time_ms():
     return int(time.time() * 1000)
 
 class GameClient:
-    def __init__(self, server_ip=None, server_port=5005):
-        self.server_ip = server_ip or os.environ.get("IP", "127.0.0.1")
+    def __init__(self, server_ip="127.0.0.1", server_port=5005):
+        self.server_ip = server_ip
         self.server_port = server_port
         self.client_socket = None
         self.running = False
 
-        # SR ARQ parameters
+        # SR ARQ
         self.N = 6
         self.base = 0
         self.nextSeqNum = 0
@@ -107,52 +104,12 @@ class GameClient:
                         del self.send_timestamp[seq]
                         while self.base not in self.window and self.base < self.nextSeqNum:
                             self.base += 1
-                        print(f"[ACK RECEIVED] seq={seq}, RTT={sampleRTT}ms")
+                        print(f"[ACK RECEIVED] seq={seq}")
                     continue
 
-                # Handle server messages
-                if msg_type == MSG_TYPE_JOIN_RESP:
-                    self.player_id = struct.unpack("!B", data[22:23])[0]
-                    print(f"[INFO] Joined server as Player {self.player_id}")
-                elif msg_type == MSG_TYPE_GAME_START:
-                    self.game_active = True
-                    print("[GAME STARTED]")
-                elif msg_type == MSG_TYPE_GAME_OVER:
-                    self.game_active = False
-                    print("[GAME OVER]")
-                elif msg_type == MSG_TYPE_BOARD_SNAPSHOT:
-                    snapshot_id = struct.unpack("!I", data[22:26])[0]
-                    print(f"[SNAPSHOT RECEIVED] id={snapshot_id}")
-
-                # Send ACK to server for reliability
+                # Send ACK
                 ack_packet = create_header(MSG_TYPE_ACK, seq, 0)
                 self.client_socket.sendto(ack_packet, addr)
 
             except socket.timeout:
                 continue
-
-    def claim_cell(self, row, col):
-        if self.game_active:
-            payload = struct.pack("!BB", row, col)
-            self._sr_send(MSG_TYPE_CLAIM_REQ, payload)
-
-    def leave_game(self):
-        self._sr_send(MSG_TYPE_LEAVE)
-        self.running = False
-        self.client_socket.close()
-
-# ==================== MAIN ====================
-if __name__ == "__main__":
-    client = GameClient()
-    client.connect()
-
-    try:
-        while True:
-            time.sleep(1)
-            if client.game_active:
-                # Random cell claim for testing
-                r = random.randint(0,19)
-                c = random.randint(0,19)
-                client.claim_cell(r, c)
-    except KeyboardInterrupt:
-        client.leave_game()
