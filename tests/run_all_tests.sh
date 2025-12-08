@@ -1,69 +1,71 @@
 #!/bin/bash
+# Automated test runner for Multiplayer_Network
+# ---------------------------------------------
+IFACE="lo"                            # Change if not using loopback
+SERVER_CMD="python3 ../server.py"
+CLIENT_CMD="python3 ../client.py"
+OUTDIR="./results"
+RUN_TIME=30                           # seconds per test
+NUM_CLIENTS=4                         # clients per test
+SCENARIOS=("baseline" "loss2" "loss5" "delay100")
 
-# ===============================
-# run_all_tests.sh
-# Git Bash friendly test runner
-# ===============================
+mkdir -p "$OUTDIR"
 
-# Paths (relative to the tests folder)
-SERVER_PATH="../server.py"
-CLIENT_PATH="../client.py"
-
-# Test configuration
-NUM_CLIENTS=4
-TEST_DURATION=20  # seconds
-
-# Arrays to store PIDs
-SERVER_PID=0
-CLIENT_PIDS=()
-
-# Function to start a Python script in the background and log output
-start_python() {
-    local script_path=$1
-    local log_file=$(basename "$script_path" .py).log
-    echo "Starting $script_path..."
-    python "$script_path" > "../tests/$log_file" 2>&1 &
-    echo $!  # Return PID
+start_server() {
+    echo "[INFO] Starting server..."
+    $SERVER_CMD > server.log 2>&1 &
+    SERVER_PID=$!
+    sleep 1
 }
 
-# ===============================
-# Start server
-# ===============================
-SERVER_PID=$(start_python "$SERVER_PATH")
-echo "Server PID: $SERVER_PID"
+start_clients() {
+    echo "[INFO] Launching $NUM_CLIENTS clients..."
+    for i in $(seq 1 $NUM_CLIENTS); do
+        $CLIENT_CMD > client_${i}.log 2>&1 &
+    done
+}
+stop_all() {
+    echo "[INFO] Stopping server and clients..."
+    pkill -f "server.py" || true
+    pkill -f "client.py" || true
+}
 
-# Give the server a moment to start
-sleep 2
+apply_netem() {
+    local scenario=$1
+    echo "[INFO] Applying netem profile: $scenario"
+    sudo tc qdisc del dev $IFACE root 2>/dev/null || true
+    case "$scenario" in
+        baseline) ;;
+    esac
+}
 
-# ===============================
-# Start clients
-# ===============================
-for ((i=1; i<=NUM_CLIENTS; i++)); do
-    CLIENT_PID=$(start_python "$CLIENT_PATH")
-    CLIENT_PIDS+=($CLIENT_PID)
-    echo "Started client $i with PID $CLIENT_PID"
-    sleep 1
+capture_traffic() {
+    local scenario=$1
+    echo "[INFO] Capturing packets..."
+    sudo tcpdump -i $IFACE -w "$OUTDIR/${scenario}.pcap" udp port 5005 > /dev/null 2>&1 &
+    TCPDUMP_PID=$!
+}
+for scenario in "${SCENARIOS[@]}"; do
+    echo "======================================"
+    echo " Running Scenario: $scenario"
+    echo "======================================"
+
+    apply_netem "$scenario"
+    capture_traffic "$scenario"
+
+    start_server
+    start_clients
+
+    echo "[INFO] Running for $RUN_TIME seconds..."
+    sleep $RUN_TIME
+
+    stop_all
+    sudo kill $TCPDUMP_PID 2>/dev/null || true
+    sudo tc qdisc del dev $IFACE root 2>/dev/null || true
+
+    echo "[INFO] Logs and PCAP saved for scenario: $scenario"
+    mkdir -p "$OUTDIR/$scenario"
+    mv ./*.log "$OUTDIR/$scenario"/
 done
 
-# ===============================
-# Let the test run
-# ===============================
-echo "Test running for $TEST_DURATION seconds..."
-sleep $TEST_DURATION
-
-# ===============================
-# Cleanup
-# ===============================
-echo "Stopping clients..."
-for pid in "${CLIENT_PIDS[@]}"; do
-    kill $pid 2>/dev/null
-done
-
-echo "Stopping server..."
-kill $SERVER_PID 2>/dev/null
-
-echo "Test completed. Check logs in the tests/ folder:"
-echo " - server.log"
-for ((i=1; i<=NUM_CLIENTS; i++)); do
-    echo " - client${i}.log"
-done
+echo "[DONE] All tests completed. Results stored in $OUTDIR/"
