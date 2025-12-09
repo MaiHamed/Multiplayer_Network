@@ -34,6 +34,7 @@ class GameServer:
 
         # Game state
         self.grid_state = [[0] * 20 for _ in range(20)]
+        self.grid_claim_time = [[0] * 20 for _ in range(20)]
         self.game_active = False
         self.min_players = 2
         self.running = False
@@ -177,7 +178,6 @@ class GameServer:
             return False
 
     def _retransmit(self):
-        """Check all client timers and retransmit if RTO exceeded."""
         now = current_time_ms()
         for pid in list(self.client_timers.keys()):
             timers = self.client_timers.get(pid, {})
@@ -206,7 +206,6 @@ class GameServer:
 
     # ==================== Server Loop ====================
     def _server_loop(self):
-        """Main server loop: receive messages, send snapshots on grid change, retransmit as needed."""
         while self.running:
             try:
                 ready, _, _ = select.select([self.server_socket], [], [], 0.01)
@@ -241,7 +240,6 @@ class GameServer:
 
     # ==================== Handle Messages ====================
     def _handle_message(self, data, addr):
-        """Parse header and handle message types."""
         try:
             header = parse_header(data)
             msg_type = header.get("msg_type")
@@ -282,36 +280,71 @@ class GameServer:
                     self._start_game()
 
             elif msg_type == MSG_TYPE_CLAIM_REQ:
-                # Determine player id by address lookup (search both active and waiting)
+                # Determine player id by address lookup
                 player_id = self._addr_to_pid(addr)
+
                 if player_id:
-                    # Use HEADER_SIZE to locate payload as in your protocol
+                    # Extract claim coordinates
                     pay = data[HEADER_SIZE:HEADER_SIZE + 2] if len(data) >= HEADER_SIZE + 2 else b''
                     if len(pay) >= 2:
                         r, c = struct.unpack("!BB", pay[:2])
-                        if 0 <= r < 20 and 0 <= c < 20:
-                            # Update grid and mark changed
-                            old_owner = self.grid_state[r][c]
-                            if old_owner != player_id:
-                                self.grid_state[r][c] = player_id
-                                self.grid_changed = True
-                                if old_owner == 0:
-                                    self.gui.log_message(f"Player {player_id} claimed cell ({r},{c})", "info")
-                                else:
-                                    self.gui.log_message(f"Player {player_id} stole cell ({r},{c}) from Player {old_owner}", "warning")
-                                # update GUI grid
-                                self.gui.update_grid(self.grid_state)
-                        else:
-                            self.gui.log_message(f"Invalid coordinates ({r},{c}) from player {player_id}", "error")
 
-                    # If player is active, update their last_seen timestamp
+                        if 0 <= r < 20 and 0 <= c < 20:
+
+                            # --- TIMESTAMP FIX STARTS HERE ---
+                            claim_time = header.get("timestamp", 0)
+
+                            # If this is the first time using timestamps, initialize matrix
+                            if not hasattr(self, "grid_claim_time"):
+                                self.grid_claim_time = [[0] * 20 for _ in range(20)]
+
+                            # Accept only newer claims
+                            if claim_time > self.grid_claim_time[r][c]:
+
+                                old_owner = self.grid_state[r][c]
+
+                                # Update grid & timestamp
+                                self.grid_state[r][c] = player_id
+                                self.grid_claim_time[r][c] = claim_time
+                                self.grid_changed = True
+
+                                # Logging
+                                if old_owner == 0:
+                                    self.gui.log_message(
+                                        f"Player {player_id} claimed cell ({r},{c})",
+                                        "info"
+                                    )
+                                else:
+                                    self.gui.log_message(
+                                        f"Player {player_id} stole cell ({r},{c}) from Player {old_owner}",
+                                        "warning"
+                                    )
+
+                                # Update GUI
+                                self.gui.update_grid(self.grid_state)
+
+                            else:
+                                # Late / outdated claim — ignore
+                                self.gui.log_message(
+                                    f"Outdated claim ignored at ({r},{c}) from Player {player_id} "
+                                    f"(claim ts={claim_time}, current ts={self.grid_claim_time[r][c]})",
+                                    "warning"
+                                )
+                            # --- TIMESTAMP FIX ENDS HERE ---
+
+                        else:
+                            self.gui.log_message(
+                                f"Invalid coordinates ({r},{c}) from player {player_id}",
+                                "error"
+                            )
+
+                    # Update player last_seen time
                     if player_id in self.clients:
                         self.clients[player_id] = (addr, time.time())
 
                 else:
-                    # Player unknown; maybe send a "join" suggestion or ignore
                     self.gui.log_message(f"Claim from unknown addr {addr}", "warning")
-
+            
             elif msg_type == MSG_TYPE_LEAVE:
                 # Remove the player (search both active and waiting)
                 removed = []
@@ -417,7 +450,6 @@ class GameServer:
 
     # ==================== Start / End Game ====================
     def _start_game(self):
-        """Move waiting players into active clients and notify them."""
         self.game_active = True
         # Convert waiting_room_players (pid->addr) to clients structure (pid->(addr, last_seen))
         for pid, addr in self.waiting_room_players.items():
@@ -439,8 +471,14 @@ class GameServer:
                 self.gui.log_message(f"Failed to send start to player {pid}: {e}", "error")
         print("[GAME STARTED]")
 
+        # --- NEW: send an initial snapshot immediately so clients learn about active players/grid ---
+        try:
+            self._send_snapshot()
+        except Exception as e:
+            self.gui.log_message(f"Failed to send initial snapshot after game start: {e}", "error")
+
+
     def end_game(self):
-        """Notify all clients that the game is over."""
         self.game_active = False
         for pid in list(self.clients.keys()):
             try:
@@ -452,7 +490,6 @@ class GameServer:
 
     # ==================== GUI Integration ====================
     def _setup_gui_callbacks(self):
-        """Setup GUI button callbacks for server (Start/Stop)."""
         try:
             self.gui.connect_button.config(text="Start Server", command=self.start)
             self.gui.disconnect_button.config(text="Stop Server", command=self.stop)
@@ -465,7 +502,6 @@ class GameServer:
         self.gui.on_disconnect_click = self.stop
 
     def start_gui(self):
-        """Start GUI main loop (delegates to GameGUI)."""
         try:
             self.gui.run()
         except Exception as e:

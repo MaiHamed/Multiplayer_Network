@@ -80,16 +80,17 @@ class GameClient:
         if not self.game_active:
             self.gui.log_message("Game hasn't started yet", "warning")
             return
+        
         self.gui.highlight_cell(row, col)
         # Call the correct method
         if self._send_claim_request(row, col):
-            self.gui.log_message(f"Claimed cell ({row},{col})", "success")
+            self.gui.log_message(f"Request to claim ({row},{col}) sent.", "claim")
 
 
     # ==================== SR ARQ SENDER ====================
     def _sr_send(self, msg_type, payload=b''):
         if self.nextSeqNum < self.base + self.N:
-            seq = self.nextSeqNum
+            seq = self.nextSeqNum # Get the sequence number
             packet = create_header(msg_type, seq, len(payload)) + payload
             try:
                 self.client_socket.sendto(packet, (self.server_ip, self.server_port))
@@ -236,34 +237,44 @@ class GameClient:
         elif msg_type == MSG_TYPE_GAME_OVER:
             self.game_active = False
             self.gui.log_message("GAME OVER! 🏁", "info")
-        elif msg_type == MSG_TYPE_BOARD_SNAPSHOT:
-            grid = unpack_grid_snapshot(payload)
-            
-            self.local_grid = [row[:] for row in grid]
-            # Add confirmed claims from grid
-            for r in range(20):
-                for c in range(20):
-                    if grid[r][c] == self.player_id:
-                        self.claimed_cells.add((r, c))
-            
-            # Keep pending claims from un-ACKed packets
-            for seq, packet in self.window.items():
-                try:
-                    header = parse_header(packet)
-                    if header['msg_type'] == MSG_TYPE_CLAIM_REQ:
-                        row, col = struct.unpack("!BB", packet[HEADER_SIZE:])
-                        self.claimed_cells.add((row, col))
-                        self.local_grid[row][col] = self.player_id
-                except:
-                    continue
-            
-            self.gui.update_grid(self.local_grid)
 
+        elif msg_type == MSG_TYPE_BOARD_SNAPSHOT:
+            try:
+                # Unpack snapshot directly from server
+                grid = unpack_grid_snapshot(payload)
+                self.local_grid = [row[:] for row in grid]
+
+                # Determine active players from snapshot
+                players_in_grid = set()
+                for r in range(20):
+                    for c in range(20):
+                        pid = grid[r][c]
+                        if pid and pid != 0:
+                            players_in_grid.add(pid)
+
+                self.active_players = players_in_grid
+
+                # Track claimed cells for this client
+                self.claimed_cells.clear()
+                for r in range(20):
+                    for c in range(20):
+                        if grid[r][c] == self.player_id:
+                            self.claimed_cells.add((r, c))
+
+                # Update GUI
+                self.gui.update_grid(self.local_grid)
+                players_map = {pid: None for pid in sorted(players_in_grid)}
+                self.gui.update_players(players_map)
+
+            except Exception as e:
+                self.gui.log_message(f"Failed to process snapshot: {e}", "error")
+
+            players_map = {pid: None for pid in sorted(players_in_grid)}
+            self.gui.update_players(players_map)
 
     # ==================== GAME ACTIONS ====================
-
     def _send_claim_request(self, row, col):
-        """Send claim request using SR-ARQ and track pending claim"""
+        """Send claim request using SR-ARQ (via _sr_send)"""
         if not self.client_socket or not self.player_id:
             self.gui.log_message("Not connected to server", "error")
             return False
@@ -273,24 +284,18 @@ class GameClient:
 
         try:
             payload = struct.pack("!BB", row, col)
-            seq = self.seq_num
-            packet = create_header(MSG_TYPE_CLAIM_REQ, seq, len(payload), ack_num=0) + payload
-            self.client_socket.sendto(packet, (self.server_ip, self.server_port))
-            self.seq_num += 1
-            self.stats['sent'] += 1
+            success = self._sr_send(MSG_TYPE_CLAIM_REQ, payload)
+            
+            if success:
+                return True
+            else:
+                self.gui.log_message(f"Claim request for ({row},{col}) dropped (window full).", "warning")
+                return False
 
-            # Track pending claim until server ACKs
-            self.window[seq] = packet
-            self.timers[seq] = current_time_ms()
-            self.send_timestamp[seq] = current_time_ms()
-            self.claimed_cells.add((row, col))  # Optional: show immediately, can remove if want only after ACK
-
-            return True
         except Exception as e:
-            self.gui.log_message(f"Claim error: {e}", "error")
+            self.gui.log_message(f"Claim preparation error: {e}", "error")
             return False
-
-
+        
     def _start_game_timer(self):
         if not self.game_active or not self.game_start_time:
             return

@@ -20,7 +20,7 @@ HEADER_FORMAT = "!4s B B H H I I Q"  #protocol_id(4), version(1), msg_type(1), l
 HEADER_SIZE = 26
 
 def create_header(msg_type, seq_num, payload_len, snapshot_id=0, ack_num=0):
-    length = HEADER_SIZE + payload_len
+    length = payload_len       
     timestamp = int(time.time() * 1000)
     return struct.pack(
         HEADER_FORMAT, 
@@ -34,10 +34,11 @@ def create_header(msg_type, seq_num, payload_len, snapshot_id=0, ack_num=0):
         timestamp
     )
 
+
 def parse_header(data):
     # Add ack_num to unpack
     protocol_id, version, msg_type, length, snapshot_id, seq_num, ack_num, timestamp = struct.unpack(
-        HEADER_FORMAT, data[:HEADER_SIZE]
+    HEADER_FORMAT, data[:HEADER_SIZE]
     )
     return {
         'protocol_id': protocol_id.decode(),
@@ -62,7 +63,7 @@ def pack_grid_snapshot(grid):
             packed_byte = (cell1 << 4) | cell2
             packed.append(packed_byte)
 
-    return bytes(packed)  # total 200 bytes for 20x20 grid
+    return bytes(packed) 
 
 
 def unpack_grid_snapshot(payload, rows=20, cols=20):
