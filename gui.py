@@ -1,4 +1,3 @@
-# gui.py - Fixed version with proper initialization order
 import tkinter as tk
 from tkinter import ttk, scrolledtext
 import queue

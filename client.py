@@ -27,6 +27,7 @@ class GameClient:
         self.N = 6
         self.base = 0
         self.nextSeqNum = 0
+        self.seq_num = 0      
         self.window = {}
         self.timers = {}
         self.send_timestamp = {}
@@ -46,7 +47,7 @@ class GameClient:
         self.game_active = False
         self.waiting_for_game = True
         self.game_start_time = None
-        self.game_duration = 60
+        self.game_duration = 5 * 60
 
         # Grid
         self.local_grid = [[0]*20 for _ in range(20)]
@@ -80,15 +81,22 @@ class GameClient:
             self.gui.log_message("Game hasn't started yet", "warning")
             return
         self.gui.highlight_cell(row, col)
-        if self.send_claim(row, col):
+        # Call the correct method
+        if self._send_claim_request(row, col):
             self.gui.log_message(f"Claimed cell ({row},{col})", "success")
+
 
     # ==================== SR ARQ SENDER ====================
     def _sr_send(self, msg_type, payload=b''):
         if self.nextSeqNum < self.base + self.N:
             seq = self.nextSeqNum
             packet = create_header(msg_type, seq, len(payload)) + payload
-            self.client_socket.sendto(packet, (self.server_ip, self.server_port))
+            try:
+                self.client_socket.sendto(packet, (self.server_ip, self.server_port))
+            except Exception as e:
+                self.gui.log_message(f"Send error: {e}", "error")
+                self.stats['dropped'] += 1
+                return False
             self.window[seq] = packet
             self.timers[seq] = current_time_ms()
             self.send_timestamp[seq] = current_time_ms()
@@ -102,7 +110,11 @@ class GameClient:
     def _retransmit(self, seq):
         packet = self.window.get(seq)
         if packet:
-            self.client_socket.sendto(packet, (self.server_ip, self.server_port))
+            try:
+                self.client_socket.sendto(packet, (self.server_ip, self.server_port))
+            except Exception as e:
+                self.gui.log_message(f"Retransmit error: {e}", "error")
+                return
             self.timers[seq] = current_time_ms()
             self.stats['sent'] += 1
             self.stats['retransmissions'] += 1
@@ -141,10 +153,14 @@ class GameClient:
         self.game_active = False
         if self.game_timer_id:
             self.gui.root.after_cancel(self.game_timer_id)
+            self.game_timer_id = None  # FIX: prevent multiple cancellations
         if self.client_socket:
             self._sr_send(MSG_TYPE_LEAVE)
             time.sleep(0.1)
-            self.client_socket.close()
+            try:
+                self.client_socket.close()
+            except:
+                pass
             self.client_socket = None
         self.player_id = None
         self.active_players.clear()
@@ -170,7 +186,10 @@ class GameClient:
                     continue
 
                 ack_packet = create_ack_packet(seq)
-                self.client_socket.sendto(ack_packet, addr)
+                try:
+                    self.client_socket.sendto(ack_packet, addr)
+                except:
+                    pass  # ignore ACK send failure
                 self._handle_data_packet(seq, msg_type, payload, header)
             except socket.timeout:
                 continue
@@ -218,17 +237,59 @@ class GameClient:
             self.game_active = False
             self.gui.log_message("GAME OVER! 🏁", "info")
         elif msg_type == MSG_TYPE_BOARD_SNAPSHOT:
-            self.local_grid = unpack_grid_snapshot(payload)
+            grid = unpack_grid_snapshot(payload)
+            
+            self.local_grid = [row[:] for row in grid]
+            # Add confirmed claims from grid
+            for r in range(20):
+                for c in range(20):
+                    if grid[r][c] == self.player_id:
+                        self.claimed_cells.add((r, c))
+            
+            # Keep pending claims from un-ACKed packets
+            for seq, packet in self.window.items():
+                try:
+                    header = parse_header(packet)
+                    if header['msg_type'] == MSG_TYPE_CLAIM_REQ:
+                        row, col = struct.unpack("!BB", packet[HEADER_SIZE:])
+                        self.claimed_cells.add((row, col))
+                        self.local_grid[row][col] = self.player_id
+                except:
+                    continue
+            
             self.gui.update_grid(self.local_grid)
 
+
     # ==================== GAME ACTIONS ====================
-    def send_claim(self, row, col):
-        if not self.game_active or not self.player_id:
+
+    def _send_claim_request(self, row, col):
+        """Send claim request using SR-ARQ and track pending claim"""
+        if not self.client_socket or not self.player_id:
+            self.gui.log_message("Not connected to server", "error")
             return False
-        if not (0 <= row < 20 and 0 <= col < 20):
+        if not self.game_active:
+            self.gui.log_message("Game hasn't started yet", "warning")
             return False
-        payload = struct.pack("!BB", row, col)
-        return self._sr_send(MSG_TYPE_CLAIM_REQ, payload)
+
+        try:
+            payload = struct.pack("!BB", row, col)
+            seq = self.seq_num
+            packet = create_header(MSG_TYPE_CLAIM_REQ, seq, len(payload), ack_num=0) + payload
+            self.client_socket.sendto(packet, (self.server_ip, self.server_port))
+            self.seq_num += 1
+            self.stats['sent'] += 1
+
+            # Track pending claim until server ACKs
+            self.window[seq] = packet
+            self.timers[seq] = current_time_ms()
+            self.send_timestamp[seq] = current_time_ms()
+            self.claimed_cells.add((row, col))  # Optional: show immediately, can remove if want only after ACK
+
+            return True
+        except Exception as e:
+            self.gui.log_message(f"Claim error: {e}", "error")
+            return False
+
 
     def _start_game_timer(self):
         if not self.game_active or not self.game_start_time:

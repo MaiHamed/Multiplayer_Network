@@ -1,10 +1,8 @@
-# waiting_room.py - SINGLE WAITING ROOM, LAUNCH CLIENTS
 import tkinter as tk
 from tkinter import ttk, messagebox
 import subprocess
 import sys
 import threading
-import time
 
 MAX_PLAYERS = 4
 MIN_PLAYERS = 2
@@ -129,7 +127,7 @@ class WaitingRoom:
         for pid in self.players:
             threading.Thread(target=self.launch_client, args=(pid,), daemon=True).start()
 
-        self.root.after(1000, self.root.destroy)  # close waiting room after launching clients
+        self.root.after(1000, self.root.destroy)  
 
     def launch_client(self, pid):
         """Launch client.py GUI for a specific player"""

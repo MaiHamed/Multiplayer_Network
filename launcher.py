@@ -1,10 +1,8 @@
-# launcher.py - UPDATED with Server/Client choice
 import tkinter as tk
 from tkinter import ttk, messagebox
 import subprocess
 import sys
-import threading
-import time
+
 
 class Launcher:
     def __init__(self):
@@ -14,7 +12,7 @@ class Launcher:
         
         self.server_process = None
         self.client_processes = []
-        self.mode = None  # 'server' or 'client'
+        self.mode = None  
         
         self.setup_ui()
     
@@ -62,10 +60,10 @@ class Launcher:
         )
         client_btn.grid(row=1, column=1)
         
-        # Server section (initially hidden)
+        # Server section 
         self.server_section = ttk.LabelFrame(main_frame, text="Server Controls", padding="10")
         self.server_section.grid(row=3, column=0, sticky=(tk.W, tk.E), pady=(0, 20))
-        self.server_section.grid_remove()  # Hide initially
+        self.server_section.grid_remove()  
         
         server_controls = ttk.Frame(self.server_section)
         server_controls.grid(row=0, column=0, sticky=(tk.W, tk.E))
@@ -85,7 +83,7 @@ class Launcher:
         # Client section (initially hidden)
         self.client_section = ttk.LabelFrame(main_frame, text="Client Controls", padding="10")
         self.client_section.grid(row=4, column=0, sticky=(tk.W, tk.E), pady=(0, 20))
-        self.client_section.grid_remove()  # Hide initially
+        self.client_section.grid_remove()  
         
         # Connection info
         conn_frame = ttk.Frame(self.client_section)
@@ -112,49 +110,18 @@ class Launcher:
         
         single_client_btn = ttk.Button(
             client_controls,
-            text="Single Player",
+            text="Player",
             command=self.launch_single_client,
             width=15
         )
         single_client_btn.grid(row=0, column=1, padx=(5, 10))
         
-        # Multiple clients buttons
-        ttk.Label(client_controls, text="Launch multiple players:").grid(row=1, column=0, sticky=tk.W, pady=(10, 0))
-        
-        multi_frame = ttk.Frame(client_controls)
-        multi_frame.grid(row=1, column=1, pady=(10, 0))
-        
-        for i, count in enumerate([2, 3, 4]):
-            btn = ttk.Button(
-                multi_frame,
-                text=f"{count} Players",
-                command=lambda c=count: self.launch_multiple_clients(c),
-                width=10
-            )
-            btn.grid(row=0, column=i, padx=2)
         
         # Quick launch buttons
         quick_frame = ttk.LabelFrame(main_frame, text="Quick Start", padding="10")
         quick_frame.grid(row=5, column=0, sticky=(tk.W, tk.E), pady=(0, 20))
         quick_frame.grid_remove()  # Hide initially
         
-        # Server + 2 clients
-        server_client_btn = ttk.Button(
-            quick_frame,
-            text="Start Server + 2 Clients",
-            command=self.quick_start_server_clients,
-            width=25
-        )
-        server_client_btn.grid(row=0, column=0, padx=(0, 10))
-        
-        # Server + 4 clients
-        server_client_btn_4 = ttk.Button(
-            quick_frame,
-            text="Start Server + 4 Clients",
-            command=lambda: self.quick_start_server_clients(4),
-            width=25
-        )
-        server_client_btn_4.grid(row=0, column=1)
         
         # Status section
         status_frame = ttk.LabelFrame(main_frame, text="Status", padding="10")
@@ -169,11 +136,6 @@ class Launcher:
         # Control buttons
         control_frame = ttk.Frame(main_frame)
         control_frame.grid(row=7, column=0, pady=(20, 0))
-        
-        # Add more clients button
-        self.add_more_btn = ttk.Button(control_frame, text="+ Add Client", 
-                                      command=self.launch_single_client, width=15, state='disabled')
-        self.add_more_btn.grid(row=0, column=0, padx=(0, 10))
         
         # Quit button
         quit_btn = ttk.Button(control_frame, text="Quit All", 
@@ -220,101 +182,27 @@ class Launcher:
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to start server: {e}")
                 self.server_status.config(text="Failed to start", foreground="red")
-    
+   
     def launch_single_client(self):
-        """Launch a single client (waiting room)"""
+        """Launch a single client and close launcher"""
         try:
-            # Get server address and port
             server_addr = self.server_addr_entry.get()
             server_port = self.server_port_entry.get()
-            
-            # Validate inputs
+
             if not server_addr or not server_port:
                 messagebox.showwarning("Warning", "Please enter server address and port")
                 return
-            
-            # Launch waiting room
-            process = subprocess.Popen([sys.executable, "waiting_room.py"])
-            self.client_processes.append(process)
-            
-            self.update_client_status()
-            self.status_label.config(text=f"Launched client #{len(self.client_processes)}")
-            
+
+            # --- CLOSE THIS PAGE / TERMINATE WINDOW ---
+            self.root.destroy()   # closes the launcher window completely
+
+            # --- OPEN WAITING ROOM ---
+            subprocess.Popen([sys.executable, "waiting_room.py",
+                            server_addr, server_port])
+
         except Exception as e:
             messagebox.showerror("Error", f"Failed to launch client: {e}")
-    
-    def launch_multiple_clients(self, count):
-        """Launch multiple clients with delays"""
-        server_addr = self.server_addr_entry.get()
-        server_port = self.server_port_entry.get()
-        
-        if not server_addr or not server_port:
-            messagebox.showwarning("Warning", "Please enter server address and port")
-            return
-        
-        # Clear existing clients if any
-        for process in self.client_processes:
-            try:
-                process.terminate()
-            except:
-                pass
-        self.client_processes = []
-        
-        # Launch new clients with delays
-        for i in range(count):
-            threading.Timer(i * 0.5, self.launch_single_client).start()
-        
-        self.status_label.config(text=f"Launching {count} client(s)...")
-    
-    def quick_start_server_clients(self, client_count=2):
-        """Quick start: server + multiple clients"""
-        self.select_server_mode()
-        
-        # Start server
-        self.start_server()
-        
-        # Wait for server to start, then launch clients
-        if self.server_process:
-            # Launch clients after server is ready
-            threading.Timer(2.0, lambda: self._launch_quick_clients(client_count)).start()
-            self.status_label.config(text=f"Starting server and {client_count} client(s)...")
-    
-    def _launch_quick_clients(self, count):
-        """Helper to launch quick clients"""
-        try:
-            # Clear any existing clients
-            for process in self.client_processes:
-                try:
-                    process.terminate()
-                except:
-                    pass
-            self.client_processes = []
-            
-            # Launch new clients
-            for i in range(count):
-                # Use localhost for quick start
-                process = subprocess.Popen([sys.executable, "waiting_room.py"])
-                self.client_processes.append(process)
-                
-                # Small delay between launches
-                time.sleep(0.5)
-            
-            self.update_client_status()
-            self.status_label.config(text=f"Quick start complete: Server + {count} client(s)")
-            
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to launch clients: {e}")
-    
-    def update_client_status(self):
-        """Update client status display"""
-        count = len(self.client_processes)
-        if count == 0:
-            self.client_status.config(text="No clients running", foreground="gray")
-        elif count == 1:
-            self.client_status.config(text="1 client running", foreground="green")
-        else:
-            self.client_status.config(text=f"{count} clients running", foreground="green")
-    
+
     def quit_all(self):
         """Close all windows"""
         # Close server
@@ -340,7 +228,6 @@ class Launcher:
         self.status_label.config(text="All processes closed", foreground="green")
     
     def run(self):
-        """Start the launcher"""
         self.root.mainloop()
 
 
