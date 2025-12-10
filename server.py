@@ -27,6 +27,8 @@ class GameServer:
         # Players
         self.clients = {}  # player_id -> (addr, last_seen)
         self.waiting_room_players = {}  # player_id -> addr
+        self.client_base = {}   # player_id -> base of SR window
+
 
         # Sequence & snapshots
         self.seq_num = 0  # global seq (used when needed)
@@ -52,6 +54,7 @@ class GameServer:
         self.client_windows = {}  # player_id -> {seq_num: packet}
         self.client_timers = {}   # player_id -> {seq_num: timestamp}
         self.client_next_seq = {} # player_id -> next seq num to use
+        self.client_base = {}   # player_id -> base of SR window
         self.RTO = 200  # retransmission timeout in ms
 
         # GUI
@@ -119,62 +122,62 @@ class GameServer:
 
     # ==================== SR ARQ Sender ====================
     def _sr_send(self, player_id, msg_type, payload=b''):
-        """Send a packet with SR ARQ reliability per client.
-        Stores the raw packet in that client's window indexed by seq_num.
-        """
-        # Make sure player exists either active or waiting
         if player_id not in self.clients and player_id not in self.waiting_room_players:
             print(f"[ERROR] Player {player_id} not found")
             return False
 
-        # Initialize per-client structures if needed
+        # Initialize structures if needed
         if player_id not in self.client_next_seq:
-            self.client_next_seq[player_id] = 0
-            self.client_windows[player_id] = {}
-            self.client_timers[player_id] = {}
+            self.client_next_seq[player_id] = 0      # nextSeqNum
+            self.client_base[player_id] = 0          # base
+            self.client_windows[player_id] = {}      # seq → packet
+            self.client_timers[player_id] = {}       # seq → timestamp
 
         next_seq = self.client_next_seq[player_id]
+        base = self.client_base[player_id]
         window = self.client_windows[player_id]
 
-        # Check window space
-        if len(window) < self.N:
-            # Build header. Some headers accept snapshot_id; include if snapshot payload.
-            # We use create_header(msg_type, seq, payload_len, optional snapshot_id)
-            if msg_type == MSG_TYPE_BOARD_SNAPSHOT:
-                # If snapshot is being sent, the caller should prepend snapshot_id in payload
-                # but we'll still pass snapshot_id into header if API supports it.
-                header = create_header(msg_type, next_seq, len(payload), self.snapshot_id)
-            else:
-                header = create_header(msg_type, next_seq, len(payload))
-            packet = header + payload
-
-            # Get address
-            if player_id in self.clients:
-                addr = self.clients[player_id][0]
-            else:
-                addr = self.waiting_room_players[player_id]
-
-            # Send
-            try:
-                self.server_socket.sendto(packet, addr)
-                window[next_seq] = packet
-                self.client_timers[player_id][next_seq] = current_time_ms()
-                self.client_next_seq[player_id] += 1
-                self.stats['sent'] += 1
-                # update GUI stats
-                self.gui.update_stats(self.stats)
-                print(f"[SEND] to player {player_id} seq={next_seq}, type={msg_type}, window={list(window.keys())}")
-                return True
-            except Exception as e:
-                self.stats['dropped'] += 1
-                self.gui.update_stats(self.stats)
-                print(f"[ERROR] sendto failed for player {player_id}: {e}")
-                return False
-        else:
-            # Window full: drop or return False
+        if next_seq >= base + self.N:
+            # Window is full, cannot send new packet
             self.stats['dropped'] += 1
             self.gui.update_stats(self.stats)
-            print(f"[DROPPED] to player {player_id}, window full")
+            print(f"[WINDOW FULL] player={player_id} next={next_seq} base={base} N={self.N}")
+            return False
+
+        # Build header
+        if msg_type == MSG_TYPE_BOARD_SNAPSHOT:
+            header = create_header(msg_type, next_seq, len(payload), self.snapshot_id)
+        else:
+            header = create_header(msg_type, next_seq, len(payload))
+
+        packet = header + payload
+
+        # Resolve address
+        if player_id in self.clients:
+            addr = self.clients[player_id][0]
+        else:
+            addr = self.waiting_room_players[player_id]
+
+        # Send
+        try:
+            self.server_socket.sendto(packet, addr)
+
+            # Store packet in window
+            window[next_seq] = packet
+            self.client_timers[player_id][next_seq] = current_time_ms()
+
+            # Advance nextSeq
+            self.client_next_seq[player_id] += 1
+
+            self.stats['sent'] += 1
+            self.gui.update_stats(self.stats)
+            print(f"[SEND] PID={player_id} seq={next_seq} base={base} window={list(window.keys())}")
+            return True
+
+        except Exception as e:
+            self.stats['dropped'] += 1
+            self.gui.update_stats(self.stats)
+            print(f"[ERROR] sendto failed for PID={player_id}: {e}")
             return False
 
     def _retransmit(self):
@@ -330,7 +333,6 @@ class GameServer:
                                     f"(claim ts={claim_time}, current ts={self.grid_claim_time[r][c]})",
                                     "warning"
                                 )
-                            # --- TIMESTAMP FIX ENDS HERE ---
 
                         else:
                             self.gui.log_message(
@@ -370,23 +372,10 @@ class GameServer:
 
 
             elif msg_type == MSG_TYPE_ACK:
-                # ACK for previously sent SR packet - find which player acked it and drop from window
                 player_id = self._addr_to_pid(addr)
                 if player_id:
-                    window = self.client_windows.get(player_id, {})
-                    timers = self.client_timers.get(player_id, {})
-                    # seq here is ack number, remove if in window
-                    if seq in window:
-                        try:
-                            del window[seq]
-                        except KeyError:
-                            pass
-                        try:
-                            del timers[seq]
-                        except KeyError:
-                            pass
-                        print(f"[ACK RECEIVED] from player {player_id} seq={seq}")
-                # no GUI update for ACK specifically
+                    self._handle_ack(player_id, seq)
+
 
             # update stats GUI periodically
             self.gui.update_stats(self.stats)
@@ -417,6 +406,35 @@ class GameServer:
         self.stats['client_count'] = len(self.clients) + len(self.waiting_room_players)
         self.gui.update_players(self.clients if self.clients else self.waiting_room_players)
         self.gui.update_stats(self.stats)
+
+    def _handle_ack(self, player_id, ack_num):
+        if player_id not in self.client_windows:
+            return
+
+        window = self.client_windows[player_id]
+        timers = self.client_timers[player_id]
+        base = self.client_base[player_id]
+        next_seq = self.client_next_seq[player_id]
+
+        # Ignore ACK outside window
+        if ack_num < base or ack_num >= next_seq:
+            print(f"[ACK-IGNORED] PID={player_id} ack={ack_num} base={base}")
+            return
+
+        # Remove the ACKed packet if present (out-of-order allowed)
+        if ack_num in window:
+            del window[ack_num]
+            if ack_num in timers:
+                del timers[ack_num]
+
+        # Slide base forward while next base is already ACKed
+        while base not in window and base < next_seq:
+            base += 1
+
+        self.client_base[player_id] = base
+
+        print(f"[ACK] PID={player_id} ack={ack_num} → new_base={base}, window={list(window.keys())}")
+
 
     # ==================== Snapshot ====================
     def _send_snapshot(self):
