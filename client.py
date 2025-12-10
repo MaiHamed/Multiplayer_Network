@@ -90,7 +90,7 @@ class GameClient:
     # ==================== SR ARQ SENDER ====================
     def _sr_send(self, msg_type, payload=b''):
         if self.nextSeqNum < self.base + self.N:
-            seq = self.nextSeqNum # Get the sequence number
+            seq = self.nextSeqNum  # Get the sequence number
             packet = create_header(msg_type, seq, len(payload)) + payload
             try:
                 self.client_socket.sendto(packet, (self.server_ip, self.server_port))
@@ -99,14 +99,16 @@ class GameClient:
                 self.stats['dropped'] += 1
                 return False
             self.window[seq] = packet
-            self.timers[seq] = current_time_ms()
-            self.send_timestamp[seq] = current_time_ms()
+            now_ms = current_time_ms()
+            self.timers[seq] = now_ms
+            self.send_timestamp[seq] = now_ms
             self.nextSeqNum += 1
             self.stats['sent'] += 1
-            return True
+            return seq
         else:
             self.stats['dropped'] += 1
             return False
+
 
     def _retransmit(self, seq):
         packet = self.window.get(seq)
@@ -149,22 +151,74 @@ class GameClient:
             self.gui.log_message(f"Connection error: {e}", "error")
             return False
 
-    def disconnect(self):
+    def disconnect(self, leave_timeout_ms=2000):
+        """
+        Gracefully disconnect:
+        - Send MSG_TYPE_LEAVE via SR-ARQ and wait for its ACK (or timeout).
+        - Then stop threads and close socket.
+        leave_timeout_ms: how long to wait (ms) for the ACK before giving up.
+        """
+        # If not connected, simple cleanup
+        if not self.client_socket:
+            self.running = False
+            self.game_active = False
+            self.player_id = None
+            self.active_players.clear()
+            self.gui.update_player_info(None, False)
+            self.gui.update_players({})
+            self.gui.log_message("Disconnected (no socket)", "info")
+            return
+
+        # Ensure the receiver/timer threads keep running while we wait for ACK
+        # Send LEAVE using SR-ARQ (will be retransmitted by _timer_loop)
+        leave_seq = self._sr_send(MSG_TYPE_LEAVE, payload=b'')
+        if leave_seq is False:
+            # Couldn't send (window full or socket error) — fallback: try raw send once
+            try:
+                packet = create_header(MSG_TYPE_LEAVE, 0, 0)
+                self.client_socket.sendto(packet, (self.server_ip, self.server_port))
+            except Exception:
+                pass
+            # proceed to shutdown after a short delay
+            time.sleep(0.05)
+        else:
+            # Wait for ACK of the leave_seq (or until timeout)
+            start = time.monotonic()
+            timeout_sec = leave_timeout_ms / 1000.0
+            while True:
+                # If leave_seq no longer in window, ACK was received for it
+                if leave_seq not in self.window:
+                    # ACK received — graceful
+                    break
+                if time.monotonic() - start >= timeout_sec:
+                    # timeout waiting for ACK — give up and close anyway
+                    self.gui.log_message(f"Timeout waiting for LEAVE ACK (seq={leave_seq}). Closing.", "warning")
+                    break
+                time.sleep(0.01)  # small sleep to yield to receive thread
+
+        # Now stop the client loops and close the socket
         self.running = False
         self.game_active = False
         if self.game_timer_id:
-            self.gui.root.after_cancel(self.game_timer_id)
-            self.game_timer_id = None  # FIX: prevent multiple cancellations
-        if self.client_socket:
-            self._sr_send(MSG_TYPE_LEAVE)
-            time.sleep(0.1)
             try:
-                self.client_socket.close()
-            except:
+                self.gui.root.after_cancel(self.game_timer_id)
+            except Exception:
                 pass
-            self.client_socket = None
+            self.game_timer_id = None
+
+        try:
+            self.client_socket.close()
+        except Exception:
+            pass
+        self.client_socket = None
+
+        # Clear local state
         self.player_id = None
+        self.window.clear()
+        self.timers.clear()
+        self.send_timestamp.clear()
         self.active_players.clear()
+
         self.gui.update_player_info(None, False)
         self.gui.update_players({})
         self.gui.log_message("Disconnected from server", "info")

@@ -346,6 +346,11 @@ class GameServer:
                     self.gui.log_message(f"Claim from unknown addr {addr}", "warning")
             
             elif msg_type == MSG_TYPE_LEAVE:
+                # ACK the LEAVE message
+                client_seq = header['seq_num']
+                ack_packet = create_ack_packet(ack_num=client_seq)
+                self.server_socket.sendto(ack_packet, addr)
+
                 # Remove the player (search both active and waiting)
                 removed = []
                 for pid, (client_addr, _) in list(self.clients.items()):
@@ -354,6 +359,7 @@ class GameServer:
                 for pid, waiting_addr in list(self.waiting_room_players.items()):
                     if waiting_addr == addr:
                         removed.append(pid)
+
                 for pid in removed:
                     self._remove_player(pid)
                     self.gui.log_message(f"Player {pid} left", "info")
@@ -361,6 +367,7 @@ class GameServer:
                 self.stats['client_count'] = len(self.clients) + len(self.waiting_room_players)
                 self.gui.update_players(self.clients if self.clients else self.waiting_room_players)
                 self.gui.update_stats(self.stats)
+
 
             elif msg_type == MSG_TYPE_ACK:
                 # ACK for previously sent SR packet - find which player acked it and drop from window
