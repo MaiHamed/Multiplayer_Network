@@ -318,10 +318,20 @@ class GameServer:
                 # If game is active and we have less than 4 active players, move waiting player in
                 if self.game_active:
                     if len(self.clients) < 4:
+                        # Reset all existing players' windows to prevent blocking
+                        for pid in list(self.clients.keys()):
+                            if pid in self.client_windows:
+                                self.client_windows[pid].clear()
+                                self.client_timers[pid].clear()
+                                self.client_next_seq[pid] = 0
+                                self.client_base[pid] = 0
+                        
+                        # NOW add the new player to active game
                         self.clients[new_pid] = (addr, time.time())
                         del self.waiting_room_players[new_pid]
                         self.gui.log_message(f"Player {new_pid} joined active game", "info")
                         self.gui.update_players(self.clients)
+                        
                         # Send GAME_START immediately to this player
                         self._sr_send(new_pid, MSG_TYPE_GAME_START, b'')
                         # Send latest snapshot so player sees current grid
