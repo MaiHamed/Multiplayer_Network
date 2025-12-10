@@ -261,11 +261,14 @@ class GameServer:
                 print(f"[ERROR] sending ACK to {addr}: {e}")
 
             if msg_type == MSG_TYPE_JOIN_REQ:
-                # Assign unique player id (avoid both waiting and active)
+                # Assign unique player id 
                 new_pid = 1
                 while new_pid in self.waiting_room_players or new_pid in self.clients:
                     new_pid += 1
+
+                # Add to waiting room first
                 self.waiting_room_players[new_pid] = addr
+
                 # Update stats
                 self.stats['client_count'] = len(self.waiting_room_players) + len(self.clients)
                 self.gui.log_message(f"Player {new_pid} joined waiting room", "success")
@@ -275,12 +278,22 @@ class GameServer:
                 # Send join response via SR ARQ to that waiting client
                 payload = struct.pack("!B", new_pid)
                 self._sr_send(new_pid, MSG_TYPE_JOIN_RESP, payload)
-                # increment global seq if you want to track outgoing frames globally
                 self.seq_num += 1
 
-                # Auto-start if enough players and game not active
-                if len(self.waiting_room_players) >= self.min_players and not self.game_active:
-                    self._start_game()
+                # If game is active and we have less than 4 active players, move waiting player in
+                if self.game_active:
+                    if len(self.clients) < 4:
+                        self.clients[new_pid] = (addr, time.time())
+                        del self.waiting_room_players[new_pid]
+                        self.gui.log_message(f"Player {new_pid} joined active game", "info")
+                        self.gui.update_players(self.clients)
+                        # Send GAME_START immediately to this player
+                        self._sr_send(new_pid, MSG_TYPE_GAME_START, b'')
+                        # Send latest snapshot so player sees current grid
+                        self._send_snapshot()
+                else:
+                    if len(self.waiting_room_players) >= 1:
+                        self._start_game()
 
             elif msg_type == MSG_TYPE_CLAIM_REQ:
                 # Determine player id by address lookup
