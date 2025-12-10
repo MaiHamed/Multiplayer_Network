@@ -3,6 +3,19 @@ from tkinter import ttk, scrolledtext
 import queue
 import time
 
+from leaderboard import LeaderboardGUI
+from protocol import MSG_TYPE_JOIN_REQ
+
+
+def calculate_scores_from_grid(grid):
+    
+    scores = {}
+    for row in grid:
+        for cell in row:
+            if cell != 0:  # 0 means unclaimed
+                scores[cell] = scores.get(cell, 0) + 1
+    # Convert to list of tuples and sort by score (highest first)
+    return sorted(scores.items(), key=lambda x: x[1], reverse=True)
 class GameGUI:
     def __init__(self, title="Grid Game", rows=20, cols=20, cell_size=25):
         self.root = tk.Tk()
@@ -55,6 +68,8 @@ class GameGUI:
         self.player_3_status = None
         self.player_4_status = None
         
+        self.local_grid = [[0 for _ in range(cols)] for _ in range(rows)]
+        self.claimed_cells = set()
         # Setup UI
         self.setup_ui()
         
@@ -628,6 +643,26 @@ class GameGUI:
         if self.root:
             self.root.quit()
             self.root.destroy()
+
+    def _end_game(self):
+        """Handle game over, show leaderboard and allow restart"""
+        # 1. Compute final scores
+        final_scores = calculate_scores_from_grid(self.grid_state)
+
+        # 2. Log the final scores
+        self.log_message(f"Game Over! Final Scores: {final_scores}", "success")
+
+        # 3. Show leaderboard and provide restart callback
+        LeaderboardGUI(self.root, final_scores, play_again_callback=self.restart_game)
+
+    def restart_game(self):
+        self._game_over_handled = False
+        self.game_active = False
+        self.waiting_for_game = True
+        self.local_grid = [[0]*20 for _ in range(20)]
+        self.claimed_cells.clear()
+        self.gui.update_grid(self.local_grid)
+        self.gui.log_message("Ready for new game...", "info")
 
 if __name__ == "__main__":
     app = GameGUI()

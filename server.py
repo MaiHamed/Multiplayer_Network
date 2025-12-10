@@ -29,7 +29,6 @@ class GameServer:
         self.waiting_room_players = {}  # player_id -> addr
         self.client_base = {}   # player_id -> base of SR window
 
-
         # Sequence & snapshots
         self.seq_num = 0  # global seq (used when needed)
         self.snapshot_id = 0  # incremental snapshot ID
@@ -41,6 +40,7 @@ class GameServer:
         self.min_players = 2
         self.running = False
         self.grid_changed = False
+        self._should_send_snapshots = False  # NEW: Control flag for snapshots
 
         # Statistics
         self.stats = {'sent': 0, 'received': 0, 'dropped': 0, 'client_count': 0}
@@ -99,6 +99,7 @@ class GameServer:
 
     def stop(self):
         self.running = False
+        self._should_send_snapshots = False  #Stop all snapshots
         if self.server_socket:
             try:
                 self.server_socket.close()
@@ -112,6 +113,8 @@ class GameServer:
         self.client_windows.clear()
         self.client_timers.clear()
         self.client_next_seq.clear()
+        self.game_active = False  # Ensure game is marked as inactive
+
 
         print("[INFO] Server stopped.")
         self.gui.log_message("Server stopped", "info")
@@ -122,8 +125,14 @@ class GameServer:
 
     # ==================== SR ARQ Sender ====================
     def _sr_send(self, player_id, msg_type, payload=b''):
+       # Check if player exists before sending
         if player_id not in self.clients and player_id not in self.waiting_room_players:
-            print(f"[ERROR] Player {player_id} not found")
+            print(f"[ERROR] Player {player_id} not found, not sending")
+            return False
+
+        # Don't send to clients if game is over and it's a snapshot
+        if msg_type == MSG_TYPE_BOARD_SNAPSHOT and not self._should_send_snapshots:
+            print(f"[INFO] Skipping snapshot for player {player_id}, snapshots disabled")
             return False
 
         # Initialize structures if needed
@@ -183,9 +192,18 @@ class GameServer:
     def _retransmit(self):
         now = current_time_ms()
         for pid in list(self.client_timers.keys()):
+            # NEW: Skip if player no longer exists
+            if pid not in self.clients and pid not in self.waiting_room_players:
+                # Clean up orphaned timer entries
+                if pid in self.client_timers:
+                    del self.client_timers[pid]
+                if pid in self.client_windows:
+                    del self.client_windows[pid]
+                continue
+
             timers = self.client_timers.get(pid, {})
             window = self.client_windows.get(pid, {})
-            # Determine address
+
             if pid in self.clients:
                 addr = self.clients[pid][0]
             elif pid in self.waiting_room_players:
@@ -415,6 +433,11 @@ class GameServer:
         self.client_timers.pop(player_id, None)
         self.client_next_seq.pop(player_id, None)
         self.waiting_room_players.pop(player_id, None)
+
+        #If no more active players, stop sending snapshots
+        if not self.clients:
+            self._should_send_snapshots = False
+
         # Update GUI & stats
         self.stats['client_count'] = len(self.clients) + len(self.waiting_room_players)
         self.gui.update_players(self.clients if self.clients else self.waiting_room_players)
@@ -452,6 +475,11 @@ class GameServer:
     # ==================== Snapshot ====================
     def _send_snapshot(self):
         """Send snapshot to all active clients (SR ARQ)."""
+        # Check if we should send snapshots
+        if not self._should_send_snapshots:
+            print(f"[INFO] Snapshots disabled, skipping")
+            return
+            
         try:
             # Pack snapshot (grid -> bytes)
             snapshot_bytes = pack_grid_snapshot(self.grid_state)
@@ -468,7 +496,6 @@ class GameServer:
                 sent = self._sr_send(pid, MSG_TYPE_BOARD_SNAPSHOT, payload)
                 if sent:
                     sent_count += 1
-                # update last seen even if send fails? keep last seen unchanged on error
 
             if sent_count > 0:
                 # Only increment snapshot id after attempted send
@@ -518,13 +545,25 @@ class GameServer:
 
     def end_game(self):
         self.game_active = False
+        self._should_send_snapshots = False  #Disable snapshots when game ends
+
+        # Send game over message to all clients
         for pid in list(self.clients.keys()):
             try:
                 self._sr_send(pid, MSG_TYPE_GAME_OVER, b'')
             except Exception as e:
                 self.gui.log_message(f"Failed to send game over to player {pid}: {e}", "error")
+        
+        # Clear game state
+        self.grid_state = [[0] * 20 for _ in range(20)]
+        self.grid_claim_time = [[0] * 20 for _ in range(20)]
+        self.grid_changed = False
+        
         print("[GAME OVER]")
         self.gui.log_message("Game over", "info")
+        
+        # Update GUI to show empty grid
+        self.gui.update_grid(self.grid_state)
 
     # ==================== GUI Integration ====================
     def _setup_gui_callbacks(self):

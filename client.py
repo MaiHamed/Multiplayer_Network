@@ -3,7 +3,8 @@ import struct
 import time
 import sys
 import threading
-from gui import GameGUI
+from gui import GameGUI, calculate_scores_from_grid
+from leaderboard import LeaderboardGUI
 from protocol import (
     create_ack_packet, create_header, parse_header, HEADER_SIZE,
     MSG_TYPE_JOIN_REQ, MSG_TYPE_JOIN_RESP,
@@ -47,7 +48,9 @@ class GameClient:
         self.game_active = False
         self.waiting_for_game = True
         self.game_start_time = None
-        self.game_duration = 5 * 60
+        self.game_duration = 10
+        self._game_over_handled = False
+
 
         # Grid
         self.local_grid = [[0]*20 for _ in range(20)]
@@ -85,8 +88,7 @@ class GameClient:
         # Call the correct method
         if self._send_claim_request(row, col):
             self.gui.log_message(f"Request to claim ({row},{col}) sent.", "claim")
-
-
+    
     # ==================== SR ARQ SENDER ====================
     def _sr_send(self, msg_type, payload=b''):
         if self.nextSeqNum < self.base + self.N:
@@ -108,8 +110,7 @@ class GameClient:
         else:
             self.stats['dropped'] += 1
             return False
-
-
+  
     def _retransmit(self, seq):
         packet = self.window.get(seq)
         if packet:
@@ -118,9 +119,15 @@ class GameClient:
             except Exception as e:
                 self.gui.log_message(f"Retransmit error: {e}", "error")
                 return
+
             self.timers[seq] = current_time_ms()
             self.stats['sent'] += 1
             self.stats['retransmissions'] += 1
+
+            # Mark this seq as retransmitted
+            if not hasattr(self, "_retransmitted_seqs"):
+                self._retransmitted_seqs = set()
+            self._retransmitted_seqs.add(seq)
 
     def _timer_loop(self):
         while self.running:
@@ -256,14 +263,37 @@ class GameClient:
     # ==================== PACKET HANDLING ====================
     def _handle_ack(self, seq, recv_ms):
         if seq in self.window:
+            # Only update RTT if this packet was never retransmitted
+            if self.stats.get('retransmissions', 0) and seq in self.timers:
+                # Check if it was retransmitted
+                retransmitted = False
+                if hasattr(self, "_retransmitted_seqs"):
+                    retransmitted = seq in self._retransmitted_seqs
+                else:
+                    self._retransmitted_seqs = set()
+                    retransmitted = False
+            else:
+                retransmitted = False
+
             sent_time = self.send_timestamp.get(seq, recv_ms)
-            sampleRTT = recv_ms - sent_time
-            self.estimatedRTT = (1 - self.alpha) * self.estimatedRTT + self.alpha * sampleRTT
-            self.devRTT = (1 - self.beta) * self.devRTT + self.beta * abs(sampleRTT - self.estimatedRTT)
-            self.RTO = self.estimatedRTT + 4*self.devRTT
-            del self.window[seq]; del self.timers[seq]; del self.send_timestamp[seq]
+
+            if not retransmitted:
+                sampleRTT = recv_ms - sent_time
+                self.estimatedRTT = (1 - self.alpha) * self.estimatedRTT + self.alpha * sampleRTT
+                self.devRTT = (1 - self.beta) * self.devRTT + self.beta * abs(sampleRTT - self.estimatedRTT)
+                self.RTO = self.estimatedRTT + 4*self.devRTT
+
+            # Clean up
+            del self.window[seq]
+            del self.timers[seq]
+            del self.send_timestamp[seq]
+            if hasattr(self, "_retransmitted_seqs"):
+                self._retransmitted_seqs.discard(seq)
+
+            # Slide base
             while self.base not in self.window and self.base < self.nextSeqNum:
                 self.base += 1
+
 
     def _handle_data_packet(self, seq, msg_type, payload, header):
         if seq == self.expected_seq:
@@ -275,7 +305,7 @@ class GameClient:
                 self.expected_seq += 1
         elif seq > self.expected_seq:
             self.receive_buffer[seq] = (msg_type, payload, header)
-
+    
     def _process_packet(self, msg_type, payload, header):
         if msg_type == MSG_TYPE_JOIN_RESP:
             self.player_id = struct.unpack("!B", payload)[0]
@@ -289,9 +319,8 @@ class GameClient:
             self.gui.update_player_info(f"Player {self.player_id} (Playing)", True)
             self._start_game_timer()
         elif msg_type == MSG_TYPE_GAME_OVER:
-            self.game_active = False
-            self.gui.log_message("GAME OVER! 🏁", "info")
-
+            # Trigger game over processing on main thread
+            self.gui.root.after(0, self._handle_game_over)
         elif msg_type == MSG_TYPE_BOARD_SNAPSHOT:
             try:
                 # Unpack snapshot directly from server
@@ -326,6 +355,54 @@ class GameClient:
             players_map = {pid: None for pid in sorted(players_in_grid)}
             self.gui.update_players(players_map)
 
+    def _handle_game_over(self):
+        # Prevent multiple calls
+        if not self.game_active and hasattr(self, '_game_over_handled') and self._game_over_handled:
+            return
+        
+        self._game_over_handled = True
+        self.game_active = False
+        
+        # Cancel any existing game timer
+        if self.game_timer_id:
+            try:
+                self.gui.root.after_cancel(self.game_timer_id)
+            except:
+                pass
+            self.game_timer_id = None
+        
+        self.gui.log_message("GAME OVER! 🏁", "info")
+        self.gui.root.title("Grid Game Client - Game Over")
+
+        # Make sure local_grid is copied, not empty
+        final_grid = [row[:] for row in self.local_grid]
+        
+        # Debug: Print the grid state
+        print(f"DEBUG: Grid size: {len(final_grid)}x{len(final_grid[0]) if final_grid else 0}")
+        print(f"DEBUG: Grid sample first few rows: {final_grid[:3] if final_grid else 'empty'}")
+        
+        final_scores = calculate_scores_from_grid(final_grid)
+        
+        # Debug: Print the scores
+        print(f"DEBUG: Final scores: {final_scores}")
+        
+        if not final_scores:
+            self.gui.log_message("No scores to display.", "warning")
+            # Show leaderboard anyway with empty scores for debugging
+            self.gui.root.after(0, lambda: LeaderboardGUI(
+                self.gui.root,
+                [(2, 0)],  # Add a dummy score for testing
+                play_again_callback=self.restart_game
+            ))
+            return
+
+        # Show leaderboard on main thread
+        self.gui.root.after(0, lambda: LeaderboardGUI(
+            self.gui.root,
+            final_scores,
+            play_again_callback=self.restart_game
+        ))
+        
     # ==================== GAME ACTIONS ====================
     def _send_claim_request(self, row, col):
         """Send claim request using SR-ARQ (via _sr_send)"""
@@ -353,16 +430,30 @@ class GameClient:
     def _start_game_timer(self):
         if not self.game_active or not self.game_start_time:
             return
+
         elapsed = time.time() - self.game_start_time
         remaining = max(0, self.game_duration - elapsed)
         minutes, seconds = divmod(int(remaining), 60)
         self.gui.root.title(f"Grid Game Client - Time: {minutes:02d}:{seconds:02d}")
+
         if remaining <= 0:
-            self.game_active = False
-            self.gui.log_message("Time's up! Game ended.", "info")
-            self.gui.root.title("Grid Game Client - Game Over")
+            # Stop timer and trigger game over
+            if self.game_timer_id:
+                self.gui.root.after_cancel(self.game_timer_id)
+                self.game_timer_id = None
+            # Trigger game over safely
+            self.gui.root.after(0, self._handle_game_over)
             return
+
+        # Continue countdown
         self.game_timer_id = self.gui.root.after(1000, self._start_game_timer)
+
+    def _show_leaderboard(self, final_scores):
+        self.leaderboard = LeaderboardGUI(
+            self.gui.root,
+            final_scores,
+            play_again_callback=self.restart_game
+        )
 
     # ==================== START GUI ====================
     def start(self):
