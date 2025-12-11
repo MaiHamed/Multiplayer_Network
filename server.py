@@ -72,7 +72,11 @@ class GameServer:
         self.client_timers = {}   # player_id -> {seq_num: timestamp}
         self.client_next_seq = {} # player_id -> next seq num to use
         self.client_base = {}   # player_id -> base of SR window
-        self.RTO = 200  # retransmission timeout in ms
+        
+        # RTT / Congestion Control (EWMA)
+        self.client_rtt = {}        # pid -> {'est': 100, 'dev': 50, 'rto': 1000}
+        self.client_send_ts = {}    # pid -> {seq: timestamp} (Original send time)
+        self.client_retrans = {}    # pid -> set(seq) (Retransmitted packets)
 
         # GUI
         self.gui = GameGUI(title="Grid Game Server")
@@ -157,7 +161,13 @@ class GameServer:
             self.client_next_seq[player_id] = 0      # nextSeqNum
             self.client_base[player_id] = 0          # base
             self.client_windows[player_id] = {}      # seq → packet
+            self.client_windows[player_id] = {}      # seq → packet
             self.client_timers[player_id] = {}       # seq → timestamp
+            
+            # Init RTT stats (RFC 6298 defaults: RTO=1s initially)
+            self.client_rtt[player_id] = {'est': 100, 'dev': 50, 'rto': 1000}
+            self.client_send_ts[player_id] = {}
+            self.client_retrans[player_id] = set()
 
         next_seq = self.client_next_seq[player_id]
         base = self.client_base[player_id]
@@ -178,7 +188,10 @@ class GameServer:
                 oldest_seq = min(window.keys()) if window else base
                 oldest_time = self.client_timers.get(player_id, {}).get(oldest_seq, 0)
                 
-                if current_time_ms() - oldest_time > 3 * self.RTO:
+                # FORCE SLIDE with dynamic RTO logic? 
+                # Use current RTO for this client
+                current_rto = self.client_rtt[player_id]['rto']
+                if current_time_ms() - oldest_time > 3 * current_rto:
                     # Force slide window (packet likely lost)
                     print(f"[FORCE SLIDE] Player {player_id}: Force sliding window past seq={oldest_seq}")
                     self.client_base[player_id] = oldest_seq + 1
@@ -215,7 +228,9 @@ class GameServer:
 
             # Store packet in window
             window[next_seq] = packet
-            self.client_timers[player_id][next_seq] = current_time_ms()
+            now = current_time_ms()
+            self.client_timers[player_id][next_seq] = now
+            self.client_send_ts[player_id][next_seq] = now # Track original send time
 
             # Advance nextSeq
             self.client_next_seq[player_id] += 1
@@ -254,14 +269,21 @@ class GameServer:
                 continue
 
             for seq, ts in list(timers.items()):
-                if now - ts >= self.RTO:
+                # Get dynamic RTO for this client
+                rto = self.client_rtt.get(pid, {'rto': 1000})['rto']
+                
+                if now - ts >= rto:
                     # retransmit
                     try:
                         self.server_socket.sendto(window[seq], addr)
                         timers[seq] = now
+                        # Mark as retransmitted (Karn's Algorithm: don't use for RTT update)
+                        if pid in self.client_retrans:
+                            self.client_retrans[pid].add(seq)
+                            
                         self.stats['sent'] += 1
                         self.gui.update_stats(self.stats)
-                        print(f"[RETRANSMIT] to player {pid} seq={seq}")
+                        print(f"[RETRANSMIT] to player {pid} seq={seq} (RTO={rto}ms)")
                     except Exception as e:
                         self.stats['dropped'] += 1
                         self.gui.update_stats(self.stats)
@@ -515,6 +537,9 @@ class GameServer:
         self.client_windows.pop(player_id, None)
         self.client_timers.pop(player_id, None)
         self.client_next_seq.pop(player_id, None)
+        self.client_rtt.pop(player_id, None)
+        self.client_send_ts.pop(player_id, None)
+        self.client_retrans.pop(player_id, None)
         self.waiting_room_players.pop(player_id, None)
 
         # If no more active players, stop sending snapshots AND reset grid
@@ -555,6 +580,37 @@ class GameServer:
             del window[ack_num]
             if player_id in self.client_timers and ack_num in self.client_timers[player_id]:
                 del self.client_timers[player_id][ack_num]
+            
+            # --- RTT UPDATE (EWMA) ---
+            # 1. Check if valid sample (not retransmitted)
+            is_retrans = (ack_num in self.client_retrans.get(player_id, set()))
+            send_ts = self.client_send_ts.get(player_id, {}).get(ack_num)
+            
+            if send_ts and not is_retrans:
+                # Karn's Algorithm passed
+                sample_rtt = current_time_ms() - send_ts
+                stats = self.client_rtt[player_id]
+                
+                # EWMA Calculation
+                # alpha = 0.125, beta = 0.25 (RFC 6298)
+                alpha = 0.125
+                beta = 0.25
+                
+                stats['est'] = (1 - alpha) * stats['est'] + alpha * sample_rtt
+                stats['dev'] = (1 - beta) * stats['dev'] + beta * abs(sample_rtt - stats['est'])
+                stats['rto'] = stats['est'] + 4 * stats['dev']
+                
+                # Max/Min bounds (Optional but good)
+                stats['rto'] = max(200, min(stats['rto'], 5000)) # Min 200ms, Max 5s
+                
+                print(f"[RTT] PID={player_id} sample={sample_rtt}ms RTO={stats['rto']:.2f}ms")
+
+            # Cleanup RTT tracking
+            if player_id in self.client_send_ts:
+                self.client_send_ts[player_id].pop(ack_num, None)
+            if player_id in self.client_retrans:
+                self.client_retrans[player_id].discard(ack_num)
+            # --------------------------
             
             print(f"[ACK] Player {player_id}: Removed seq {ack_num}")
             
@@ -781,6 +837,9 @@ class GameServer:
         self.client_timers.clear()
         self.client_next_seq.clear()
         self.client_base.clear()
+        self.client_rtt.clear()
+        self.client_send_ts.clear()
+        self.client_retrans.clear()
         
         # Reset sequence numbers (optional, you might want to keep them)
         self.snapshot_id = 0
