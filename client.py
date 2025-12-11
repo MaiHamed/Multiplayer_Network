@@ -6,11 +6,11 @@ import threading
 from gui import GameGUI, calculate_scores_from_grid
 from leaderboard import LeaderboardGUI
 from protocol import (
-    create_ack_packet, create_header, parse_header, HEADER_SIZE,
+    MSG_TYPE_LEADERBOARD, create_ack_packet, create_header, parse_header, HEADER_SIZE,
     MSG_TYPE_JOIN_REQ, MSG_TYPE_JOIN_RESP,
     MSG_TYPE_CLAIM_REQ, MSG_TYPE_BOARD_SNAPSHOT, MSG_TYPE_LEAVE,
     MSG_TYPE_GAME_START, MSG_TYPE_GAME_OVER,
-    unpack_grid_snapshot, MSG_TYPE_ACK
+    unpack_grid_snapshot, MSG_TYPE_ACK, unpack_leaderboard_data
 )
 
 def current_time_ms():
@@ -50,6 +50,9 @@ class GameClient:
         self.game_start_time = None
         self.game_duration = 100
         self._game_over_handled = False
+        self.final_scores = []
+
+
 
 
         # Grid
@@ -64,6 +67,8 @@ class GameClient:
         self.gui = GameGUI(title=f"Grid Game Client{' - Player '+str(self.player_id) if self.player_id else ''}")
         self._setup_gui_callbacks()
         self.game_timer_id = None
+        self.gui.set_restart_callback(self.restart_game)
+
 
         # Automatically connect when GUI starts
         self.gui.root.after(500, self.connect)
@@ -84,11 +89,27 @@ class GameClient:
             self.gui.log_message("Game hasn't started yet", "warning")
             return
         
-        self.gui.highlight_cell(row, col)
-        # Call the correct method
+        # Check if cell is already claimed (by anyone)
+        if self.local_grid[row][col] != 0:
+            self.gui.log_message(f"Cell ({row},{col}) already claimed!", "warning")
+            return
+        
+        # OPTIMISTIC UPDATE: Immediately update local grid and GUI with player color
+        self.local_grid[row][col] = self.player_id
+        self.claimed_cells.add((row, col))
+        
+        # Update GUI to show player color immediately
+        self.gui.update_grid(self.local_grid)
+        
+        # Send claim request to server
         if self._send_claim_request(row, col):
             self.gui.log_message(f"Request to claim ({row},{col}) sent.", "claim")
-    
+        else:
+            # If send failed, revert the optimistic update
+            self.local_grid[row][col] = 0
+            self.claimed_cells.discard((row, col))
+            self.gui.update_grid(self.local_grid)
+
     # ==================== SR ARQ SENDER ====================
     def _sr_send(self, msg_type, payload=b''):
         if self.nextSeqNum < self.base + self.N:
@@ -159,12 +180,6 @@ class GameClient:
             return False
 
     def disconnect(self, leave_timeout_ms=2000):
-        """
-        Gracefully disconnect:
-        - Send MSG_TYPE_LEAVE via SR-ARQ and wait for its ACK (or timeout).
-        - Then stop threads and close socket.
-        leave_timeout_ms: how long to wait (ms) for the ACK before giving up.
-        """
         # If not connected, simple cleanup
         if not self.client_socket:
             self.running = False
@@ -297,21 +312,44 @@ class GameClient:
 
     ######## if seq no < less than expected_seq reciever should send ack but not process the packet ########
     def _handle_data_packet(self, seq, msg_type, payload, header):
+        """
+        Handle data packet from server according to SR ARQ protocol.
+        """
+        # Send ACK for this packet immediately (as per protocol)
+        ack_packet = create_ack_packet(seq)
+        try:
+            self.client_socket.sendto(ack_packet, (self.server_ip, self.server_port))
+            print(f"[CLIENT {self.player_id}] Sent ACK for seq={seq}")
+        except Exception as e:
+            print(f"[CLIENT {self.player_id}] Failed to send ACK: {e}")
+        
+        # Store received ACK number for CLAIM_REQUESTs
+        self.last_ack_num = seq
+        
+        # Process packet based on sequence number
         if seq == self.expected_seq:
             self._process_packet(msg_type, payload, header)
             self.expected_seq += 1
+            
+            # Process any buffered packets in order
             while self.expected_seq in self.receive_buffer:
-                buffered = self.receive_buffer.pop(self.expected_seq)
-                self._process_packet(*buffered)
+                buffered_msg_type, buffered_payload, buffered_header = self.receive_buffer.pop(self.expected_seq)
+                self._process_packet(buffered_msg_type, buffered_payload, buffered_header)
                 self.expected_seq += 1
         elif seq > self.expected_seq:
+            # Buffer out-of-order packet
             self.receive_buffer[seq] = (msg_type, payload, header)
-    
+            print(f"[CLIENT {self.player_id}] Buffered out-of-order packet seq={seq}, expecting {self.expected_seq}")
+        else:
+            # Duplicate packet, ignore but still ACK it
+            print(f"[CLIENT {self.player_id}] Received duplicate packet seq={seq}")
+
     def _process_packet(self, msg_type, payload, header):
         if msg_type == MSG_TYPE_JOIN_RESP:
             self.player_id = struct.unpack("!B", payload)[0]
             self.gui.update_player_info(f"Player {self.player_id} (Waiting)", True)
             self.gui.log_message(f"Joined as Player {self.player_id}", "success")
+        
         elif msg_type == MSG_TYPE_GAME_START:
             self.game_active = True
             self.waiting_for_game = False
@@ -319,94 +357,93 @@ class GameClient:
             self.gui.log_message("GAME STARTED! 🎮", "success")
             self.gui.update_player_info(f"Player {self.player_id} (Playing)", True)
             self._start_game_timer()
+        
         elif msg_type == MSG_TYPE_GAME_OVER:
-            # Trigger game over processing on main thread
-            self.gui.root.after(0, self._handle_game_over)
-        elif msg_type == MSG_TYPE_BOARD_SNAPSHOT:
+            # Store that we received game over, but wait for leaderboard
+            self.game_active = False
+            self.received_game_over = True  # Add this flag
+            self.gui.log_message("Game Over! Waiting for final scores...", "info")
+            
+            # Start a timer to check if leaderboard arrives within timeout
+            if hasattr(self, '_leaderboard_timeout_id'):
+                self.gui.root.after_cancel(self._leaderboard_timeout_id)
+            self._leaderboard_timeout_id = self.gui.root.after(2000, self._handle_leaderboard_timeout)
+        
+        elif msg_type == MSG_TYPE_LEADERBOARD:
+            # Cancel the timeout timer
+            if hasattr(self, '_leaderboard_timeout_id'):
+                self.gui.root.after_cancel(self._leaderboard_timeout_id)
+            
             try:
-                # Unpack snapshot directly from server
-                grid = unpack_grid_snapshot(payload)
-                self.local_grid = [row[:] for row in grid]
+                self.final_scores = unpack_leaderboard_data(payload)
+                self.gui.log_message(f"Received final scores from server", "success")
+                
+                # Show leaderboard on GUI thread
+                self.gui.root.after(0, self._show_server_leaderboard)
+                
+            except Exception as e:
+                self.gui.log_message(f"Failed to parse leaderboard: {e}", "error")
+                # Fallback to local calculation
+                self.gui.root.after(0, self._handle_game_over)
+        
+        elif msg_type == MSG_TYPE_BOARD_SNAPSHOT:
+                try:
+                    # Extract snapshot ID
+                    if len(payload) >= 4:
+                        snapshot_id = struct.unpack("!I", payload[:4])[0]
+                        grid_payload = payload[4:]
+                    else:
+                        grid_payload = payload
+                        
+                    # Unpack snapshot from server
+                    grid = unpack_grid_snapshot(grid_payload)
+                    self.local_grid = [row[:] for row in grid]
 
-                # Determine active players from snapshot
-                players_in_grid = set()
-                for r in range(20):
-                    for c in range(20):
-                        pid = grid[r][c]
-                        if pid and pid != 0:
-                            players_in_grid.add(pid)
+                    # Determine ALL active players from snapshot
+                    players_in_grid = set()
+                    for r in range(20):
+                        for c in range(20):
+                            pid = grid[r][c]
+                            if pid != 0:
+                                players_in_grid.add(pid)
 
-                self.active_players = players_in_grid
+                    # Include ourselves in active players if we're in the game
+                    if self.player_id:
+                        players_in_grid.add(self.player_id)
+                        
+                    self.active_players = players_in_grid
 
-                # Track claimed cells for this client
-                self.claimed_cells.clear()
-                for r in range(20):
-                    for c in range(20):
-                        if grid[r][c] == self.player_id:
-                            self.claimed_cells.add((r, c))
+                    # Track claimed cells for this client
+                    self.claimed_cells.clear()
+                    for r in range(20):
+                        for c in range(20):
+                            if grid[r][c] == self.player_id:
+                                self.claimed_cells.add((r, c))
 
-                # Update GUI
-                self.gui.update_grid(self.local_grid)
+                    # Update GUI with complete grid
+                    self.gui.root.after(0, lambda: self.gui._update_grid_display(grid))
+                    
+                    # Update player list in GUI
+                    self.gui.root.after(0, lambda: self.gui._update_players_display(players_in_grid))
+                    
+                    # Update statistics
+                    self.stats['received'] += 1
+                    self.gui.root.after(0, lambda: self.gui._update_stats_display(self.stats))
+                    
+                    # Log snapshot receipt
+                    if snapshot_id % 10 == 0:
+                        self.gui.log_message(f"Snapshot {snapshot_id} received with {len(players_in_grid)} players", "info")
+
+                except Exception as e:
+                    self.gui.log_message(f"Failed to process snapshot: {e}", "error")
+
                 players_map = {pid: None for pid in sorted(players_in_grid)}
                 self.gui.update_players(players_map)
 
-            except Exception as e:
-                self.gui.log_message(f"Failed to process snapshot: {e}", "error")
 
-            players_map = {pid: None for pid in sorted(players_in_grid)}
-            self.gui.update_players(players_map)
-
-    def _handle_game_over(self):
-        # Prevent multiple calls
-        if not self.game_active and hasattr(self, '_game_over_handled') and self._game_over_handled:
-            return
-        
-        self._game_over_handled = True
-        self.game_active = False
-        
-        # Cancel any existing game timer
-        if self.game_timer_id:
-            try:
-                self.gui.root.after_cancel(self.game_timer_id)
-            except:
-                pass
-            self.game_timer_id = None
-        
-        self.gui.log_message("GAME OVER! 🏁", "info")
-        self.gui.root.title("Grid Game Client - Game Over")
-
-        # Make sure local_grid is copied, not empty
-        final_grid = [row[:] for row in self.local_grid]
-        
-        # Debug: Print the grid state
-        print(f"DEBUG: Grid size: {len(final_grid)}x{len(final_grid[0]) if final_grid else 0}")
-        print(f"DEBUG: Grid sample first few rows: {final_grid[:3] if final_grid else 'empty'}")
-        
-        final_scores = calculate_scores_from_grid(final_grid)
-        
-        # Debug: Print the scores
-        print(f"DEBUG: Final scores: {final_scores}")
-        
-        if not final_scores:
-            self.gui.log_message("No scores to display.", "warning")
-            # Show leaderboard anyway with empty scores for debugging
-            self.gui.root.after(0, lambda: LeaderboardGUI(
-                self.gui.root,
-                [(2, 0)],  # Add a dummy score for testing
-                play_again_callback=self.restart_game
-            ))
-            return
-
-        # Show leaderboard on main thread
-        self.gui.root.after(0, lambda: LeaderboardGUI(
-            self.gui.root,
-            final_scores,
-            play_again_callback=self.restart_game
-        ))
-        
     # ==================== GAME ACTIONS ====================
     def _send_claim_request(self, row, col):
-        """Send claim request using SR-ARQ (via _sr_send)"""
+        """Send claim request using SR-ARQ with proper ACK number."""
         if not self.client_socket or not self.player_id:
             self.gui.log_message("Not connected to server", "error")
             return False
@@ -415,10 +452,18 @@ class GameClient:
             return False
 
         try:
-            payload = struct.pack("!BB", row, col)
+            # Include the latest ACK number in the payload or header
+            # Based on protocol: "AckNum acknowledges the latest valid server snapshot"
+            ack_num = getattr(self, 'last_ack_num', 0)
+            
+            # Pack row, col, and ack_num
+            payload = struct.pack("!BBH", row, col, ack_num)  # 2 bytes for ack_num
+            
+            # Send using SR ARQ
             success = self._sr_send(MSG_TYPE_CLAIM_REQ, payload)
             
             if success:
+                print(f"[CLIENT {self.player_id}] Claim request for ({row},{col}) sent with ack={ack_num}")
                 return True
             else:
                 self.gui.log_message(f"Claim request for ({row},{col}) dropped (window full).", "warning")
@@ -427,7 +472,6 @@ class GameClient:
         except Exception as e:
             self.gui.log_message(f"Claim preparation error: {e}", "error")
             return False
-        
     def _start_game_timer(self):
         if not self.game_active or not self.game_start_time:
             return
@@ -449,12 +493,75 @@ class GameClient:
         # Continue countdown
         self.game_timer_id = self.gui.root.after(1000, self._start_game_timer)
 
-    def _show_leaderboard(self, final_scores):
+    def _handle_game_over(self):
+        # Prevent multiple calls
+        if not self.game_active and hasattr(self, '_game_over_handled') and self._game_over_handled:
+            return
+        
+        self._game_over_handled = True
+        self.game_active = False
+        
+        # Cancel any existing game timer
+        if self.game_timer_id:
+            try:
+                self.gui.root.after_cancel(self.game_timer_id)
+            except:
+                pass
+            self.game_timer_id = None
+        
+        self.gui.log_message("GAME OVER! 🏁", "info")
+        self.gui.root.title("Grid Game Client - Game Over")
+        
+        # Calculate scores from CURRENT grid (which has all players)
+        final_grid = [row[:] for row in self.local_grid]
+        scores = calculate_scores_from_grid(final_grid)
+        
+        # Log all players found
+        player_ids = set()
+        for row in final_grid:
+            for cell in row:
+                if cell != 0:
+                    player_ids.add(cell)
+        
+        self.gui.log_message(f"Found players in final grid: {sorted(player_ids)}", "info")
+        
+        # Show leaderboard with all players
+        self._show_leaderboard(scores)
+    
+    def _show_server_leaderboard(self):
+            if self.final_scores:
+                # Use the scores from server
+                self.gui.root.after(0, lambda: self._show_leaderboard(self.final_scores))
+            else:
+                # Fallback to local calculation
+                self.gui.root.after(0, self._handle_game_over)
+
+    def _show_leaderboard(self, scores):
+        """Show leaderboard with given scores"""
         self.leaderboard = LeaderboardGUI(
             self.gui.root,
-            final_scores,
+            scores,
             play_again_callback=self.restart_game
         )
+    
+    def restart_game(self):
+        self._game_over_handled = False
+        self.waiting_for_game = True
+        
+        # Reset local state
+        self.local_grid = [[0]*20 for _ in range(20)]
+        self.claimed_cells.clear()
+        self.final_scores = []
+        
+        # Update GUI
+        self.gui.update_grid(self.local_grid)
+        self.gui.update_player_info(f"Player {self.player_id} (Waiting)", True)
+        self.gui.log_message("Ready for new game...", "info")
+        
+        # Request to join new game
+        if self.client_socket and self.running:
+            self._sr_send(MSG_TYPE_JOIN_REQ, payload=b'')
+            self.gui.log_message("Requested to join new game", "info")
 
     # ==================== START GUI ====================
     def start(self):
