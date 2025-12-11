@@ -53,8 +53,6 @@ class GameClient:
         self.final_scores = []
 
 
-
-
         # Grid
         self.local_grid = [[0]*20 for _ in range(20)]
         self.claimed_cells = set()
@@ -68,8 +66,7 @@ class GameClient:
         self._setup_gui_callbacks()
         self.game_timer_id = None
         self.gui.set_restart_callback(self.restart_game)
-
-
+        
         # Automatically connect when GUI starts
         self.gui.root.after(500, self.connect)
 
@@ -343,10 +340,24 @@ class GameClient:
             print(f"[CLIENT {self.player_id}] Received duplicate packet seq={seq}")
 
     def _process_packet(self, msg_type, payload, header):
+        seq = header.get("seq_num", 0)
+        
         if msg_type == MSG_TYPE_JOIN_RESP:
-            self.player_id = struct.unpack("!B", payload)[0]
-            self.gui.update_player_info(f"Player {self.player_id} (Waiting)", True)
-            self.gui.log_message(f"Joined as Player {self.player_id}", "success")
+            new_player_id = struct.unpack("!B", payload)[0]
+            
+            # If this is our first time getting a player ID
+            if self.player_id is None:
+                self.player_id = new_player_id
+                self.gui.update_player_info(f"Player {self.player_id} (Waiting)", True)
+                self.gui.log_message(f"Joined as Player {self.player_id}", "success")
+                print(f"[CLIENT] Assigned Player ID: {self.player_id}")
+            # If we already have a player ID but this is confirming it
+            elif self.player_id == new_player_id:
+                # This is just a confirmation/retransmission, don't log again
+                print(f"[CLIENT] Received confirmation of Player ID: {self.player_id}")
+            else:
+                # This shouldn't happen, but log it
+                print(f"[WARNING] Received different Player ID: {new_player_id}, already have: {self.player_id}")
         
         elif msg_type == MSG_TYPE_GAME_START:
             self.game_active = True
