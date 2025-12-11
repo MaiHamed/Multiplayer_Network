@@ -93,7 +93,7 @@ scenario_runner() {
     # Stop server
     stop_server
 
-    # Skip network reset (tc commands) on Windows
+    # Skip network reset (Linux-only tc commands)
 
     # Generate plots
     echo "[PLOTS] Generating plots..."
