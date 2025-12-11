@@ -3,16 +3,18 @@ set -euo pipefail
 
 #############################################
 #  Multiplayer Game Automated Test Runner   #
-#  Runs all 4 network impairment scenarios  #
+#  Runs all 4 network impairment scenarios #
+#  Windows / Git Bash compatible           #
 #############################################
 
 ### === CONFIGURATION === ###
 SERVER_PORT=5005
 SERVER_IP="127.0.0.1"
 NUM_CLIENTS=${1:-8}      # Number of headless test clients
-DURATION=${2:-30}        # Duration per scenario
+DURATION=${2:-30}         # Duration per scenario
+CLAIMS_PER_SEC=2          # Client send rate
 OUTDIR_BASE="results"
- 
+
 ### Directories ###
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"  # Project root (server.py location)
@@ -29,6 +31,7 @@ NC='\033[0m'  # No color
 
 start_server() {
     echo -e "${CYAN}[SERVER] Starting server (headless)...${NC}"
+    mkdir -p "$OUTDIR"
     nohup python3 "$ROOT_DIR/server.py" --no-gui > "$OUTDIR/server.log" 2>&1 &
     SERVER_PID=$!
     sleep 1
@@ -37,13 +40,17 @@ start_server() {
 
 stop_server() {
     echo -e "${YELLOW}[SERVER] Stopping server...${NC}"
-    kill "$SERVER_PID" 2>/dev/null || true
-    wait "$SERVER_PID" 2>/dev/null || true
+    if [ -n "${SERVER_PID-}" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
+        kill "$SERVER_PID" 2>/dev/null || true
+        wait "$SERVER_PID" 2>/dev/null || true
+    fi
 }
 
 start_clients() {
     local prefix="$1"
     echo -e "${CYAN}[CLIENTS] Launching $NUM_CLIENTS clients...${NC}"
+
+    mkdir -p "$OUTDIR/$prefix"
 
     for i in $(seq 1 "$NUM_CLIENTS"); do
         nohup python3 "$SCRIPT_DIR/test_client.py" \
@@ -52,24 +59,10 @@ start_clients() {
             --duration "$DURATION" \
             --send-rate "$CLAIMS_PER_SEC" \
             --client-idx "$i" \
-            --out "$OUTDIR/${prefix}" \
+            --out "$OUTDIR/$prefix" \
             > "$OUTDIR/${prefix}_client${i}.log" 2>&1 &
         sleep 0.02
     done
-}
-
-### Network impairment helpers ###
-clear_netem() {
-    IFACE="$1"
-    sudo tc qdisc del dev "$IFACE" root 2>/dev/null || true
-}
-
-apply_netem() {
-    IFACE="$1"
-    shift
-    echo -e "${YELLOW}[NETEM] Applying: $* on $IFACE${NC}"
-    clear_netem "$IFACE"
-    sudo tc qdisc add dev "$IFACE" root netem "$@"
 }
 
 #############################################
@@ -86,13 +79,9 @@ scenario_runner() {
     echo -e "\n${CYAN}=== Running Scenario: $SCENARIO_NAME ===${NC}"
     echo "[OUTDIR] Logs and CSVs → $OUTDIR"
 
-    # Detect main interface
-   IFACE="lo"
-   echo "[NET] Using interface: $IFACE (network impairment skipped on Windows)"
-
-    echo "[NET] Using interface: $IFACE"
-
-   
+    # Skip network detection and impairment on Windows
+    IFACE="lo"
+    echo "[NET] Using interface: $IFACE (network impairment skipped on Windows)"
 
     # Run server + clients
     start_server
@@ -104,10 +93,7 @@ scenario_runner() {
     # Stop server
     stop_server
 
-    # Reset network
-    if [ -n "$NETEM_CMD" ]; then
-        clear_netem "$IFACE"
-    fi
+    # Skip network reset (tc commands) on Windows
 
     # Generate plots
     echo "[PLOTS] Generating plots..."
