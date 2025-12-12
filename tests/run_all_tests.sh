@@ -36,6 +36,9 @@ cleanup() {
     # Stop Python processes
     pkill -f "server.py" || true
     pkill -f "test_client.py" || true
+    if [ -n "${TCPDUMP_PID-}" ]; then
+        sudo kill "$TCPDUMP_PID" 2>/dev/null || true
+    fi
     
     # Reset Network (sudo required)
     if sudo tc qdisc show dev "$IFACE" | grep -q "netem"; then
@@ -47,10 +50,16 @@ trap cleanup EXIT INT TERM
 start_server() {
     echo -e "${CYAN}[SERVER] Starting server...${NC}"
     mkdir -p "$OUTDIR"
-    nohup python3 "$ROOT_DIR/server.py" --no-gui > "$OUTDIR/server.log" 2>&1 &
+    
+    # Start Packet Capture
+    echo -e "${CYAN}[PCAP] Starting tcpdump on $IFACE...${NC}"
+    sudo tcpdump -i "$IFACE" port "$SERVER_PORT" -w "$OUTDIR/server.pcap" > /dev/null 2>&1 &
+    TCPDUMP_PID=$!
+
+    nohup python3 "$ROOT_DIR/server.py" --no-gui --metrics-file "$OUTDIR/server_metrics.csv" > "$OUTDIR/server.log" 2>&1 &
     SERVER_PID=$!
     sleep 1
-    echo -e "${GREEN}[SERVER] Running with PID $SERVER_PID${NC}"
+    echo -e "${GREEN}[SERVER] Running with PID $SERVER_PID (PCAP PID: $TCPDUMP_PID)${NC}"
 }
 
 stop_server() {
@@ -58,6 +67,12 @@ stop_server() {
     if [ -n "${SERVER_PID-}" ]; then
         kill "$SERVER_PID" 2>/dev/null || true
         wait "$SERVER_PID" 2>/dev/null || true
+    fi
+    
+    if [ -n "${TCPDUMP_PID-}" ]; then
+        echo -e "${YELLOW}[PCAP] Stopping tcpdump...${NC}"
+        sudo kill "$TCPDUMP_PID" 2>/dev/null || true
+        wait "$TCPDUMP_PID" 2>/dev/null || true
     fi
 }
 
@@ -156,3 +171,13 @@ scenario_runner "loss_5" "loss 5%"
 scenario_runner "delay_100ms" "delay 100ms 10ms distribution normal"
 
 echo -e "\n${GREEN}[ALL TESTS COMPLETED] Results stored in $OUTDIR_BASE.${NC}\n"
+
+# Run Post-Processing to generate summary.csv
+echo -e "${CYAN}[POSTPROCESS] Analyzing results...${NC}"
+python3 "$SCRIPT_DIR/postprocess.py"
+
+# Generate Aggregate Plots
+if [ -f "$SCRIPT_DIR/generate_plots.py" ]; then
+    echo -e "${CYAN}[PLOTS] Generating aggregate plots...${NC}"
+    python3 "$SCRIPT_DIR/generate_plots.py" "$ROOT_DIR/$OUTDIR_BASE" || true
+fi
