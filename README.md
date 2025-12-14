@@ -1,6 +1,34 @@
 # Multiplayer Network Game – Phase 2
 
 **Grid State Synchronization Protocol (GSSP)**
+- [Multiplayer Network Game – Phase 2](#multiplayer-network-game--phase-2)
+  - [Overview](#overview)
+  - [Design Rationale \& Mechanisms](#design-rationale--mechanisms)
+    - [1. Transport Layer: UDP with Custom Reliability](#1-transport-layer-udp-with-custom-reliability)
+    - [2. Error Control: Selective Repeat ARQ](#2-error-control-selective-repeat-arq)
+    - [3. State Management: Authoritative Server](#3-state-management-authoritative-server)
+    - [4. Bandwidth Optimization: Event-Driven Delta Snapshots](#4-bandwidth-optimization-event-driven-delta-snapshots)
+  - [Key Features (Phase 2 Enhancements)](#key-features-phase-2-enhancements)
+  - [Project Structure](#project-structure)
+  - [Requirements](#requirements)
+  - [How the System Works](#how-the-system-works)
+    - [1. Launcher \& Startup](#1-launcher--startup)
+    - [2. Waiting Room](#2-waiting-room)
+    - [3. Gameplay](#3-gameplay)
+    - [4. End of Game](#4-end-of-game)
+  - [Protocol Summary (GSSP)](#protocol-summary-gssp)
+    - [Supported Message Types](#supported-message-types)
+  - [Running the Project Locally](#running-the-project-locally)
+    - [Step 1 — Start the Launcher](#step-1--start-the-launcher)
+    - [Step 2 — Launch Server](#step-2--launch-server)
+    - [Step 3 — Launch Clients](#step-3--launch-clients)
+    - [Step 4 — Start the Game](#step-4--start-the-game)
+  - [Testing \& Network Simulation (Phase 2)](#testing--network-simulation-phase-2)
+    - [Example Commands](#example-commands)
+  - [Metrics Collected](#metrics-collected)
+  - [Acceptance Criteria Coverage](#acceptance-criteria-coverage)
+  - [Notes](#notes)
+
 
 ## Overview
 
@@ -10,6 +38,34 @@ It extends the Phase 1 prototype by implementing a **reliable, event-driven sync
 The server acts as an **authoritative node**, maintaining the global grid state and synchronizing all connected clients using **delta-based board snapshots**. Communication is optimized for **low latency** and **bandwidth efficiency**, even under packet loss and delay.
 
 ---
+
+## Design Rationale & Mechanisms
+
+To achieve real-time performance while ensuring game state consistency, the system employs several specific architectural patterns and protocol designs.
+
+### 1. Transport Layer: UDP with Custom Reliability
+* **Decision:** Use UDP instead of TCP.
+* **Reasoning:** TCP enforces strict ordering and retransmission, leading to **Head-of-Line (HOL) blocking**. In a real-time game, waiting for a lost packet to arrive before processing newer packets causes perceptible lag.
+
+### 2. Error Control: Selective Repeat ARQ
+* **Decision:** Implement Selective Repeat Automatic Repeat Request (ARQ).
+* **Reasoning:** Simple "Stop-and-Wait" is too slow, and "Go-Back-N" wastes bandwidth by resending already-received packets.
+* **Mechanism:**
+    * The sender maintains a window of unacknowledged packets.
+    * The receiver acknowledges packets individually.
+    * Only specific lost packets are retransmitted after a per-packet timer expires, optimizing bandwidth usage under simulated packet loss (e.g., `netem` 5% loss).
+
+### 3. State Management: Authoritative Server
+
+
+* **Decision:** Server is the single source of truth.
+* **Reasoning:** Peer-to-peer architectures are prone to race conditions (two players claiming a cell simultaneously) and cheating.
+* **Mechanism:** Clients send `CLAIM_REQUEST` intents. The server processes these sequentially. If valid, the server updates the state and broadcasts a `BOARD_SNAPSHOT`. If invalid (e.g., cell already taken), the request is ignored or rejected, ensuring all clients eventually converge on the server's state.
+
+### 4. Bandwidth Optimization: Event-Driven Delta Snapshots
+* **Decision:** Send updates on state change only (Event-Driven), rather than a fixed tick rate (e.g., 60Hz streaming).
+* **Reasoning:** Streaming the full board continuously consumes unnecessary bandwidth, especially when the grid is static.
+* **Mechanism:** The server broadcasts `BOARD_SNAPSHOT` messages only when a player successfully claims a cell or the game phase changes. This "Delta" approach significantly reduces network load.
 
 ## Key Features (Phase 2 Enhancements)
 
@@ -219,12 +275,12 @@ Reported statistics:
 
 ## Acceptance Criteria Coverage
 
-| Scenario     | Result                            |
-| ------------ | --------------------------------- |
-| Baseline     | ≤ 50 ms latency, stable CPU       |
-| 2% Loss      | Graceful interpolation, low error |
-| 5% Loss      | ≥ 99% critical event delivery     |
-| 100 ms Delay | Stable gameplay, no desync        |
+| Scenario     | Result                        |
+| ------------ | ----------------------------- |
+| Baseline     | ≤ 50 ms latency, stable CPU   |
+| 2% Loss      | low error                     |
+| 5% Loss      | ≥ 99% critical event delivery |
+| 100 ms Delay | Stable gameplay, no desync    |
 
 ---
 
