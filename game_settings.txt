@@ -1,1 +1,1 @@
-stealing_enabled=True
+stealing_enabled=1

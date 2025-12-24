@@ -11,11 +11,10 @@ MIN_PLAYERS = 2
 WAITING_ROOM_PORT = 5006 
 
 _waiting_room_instance = None
-GAME_SETTINGS = {"stealing_enabled": False}  # Default to no stealing
 
 class WaitingRoom:
     def __init__(self):
-        global _waiting_room_instance, GAME_SETTINGS
+        global _waiting_room_instance
         
         if _waiting_room_instance is not None:
             try:
@@ -42,9 +41,8 @@ class WaitingRoom:
         self.waiting_timer = 60
         self.timer_running = False
         
-        # Game settings
-        self.stealing_enabled = tk.BooleanVar(value=False)
-        GAME_SETTINGS["stealing_enabled"] = False  # Reset global setting
+        # Game settings - Default to TRUE for stealing
+        self.stealing_enabled = tk.BooleanVar(value=True)  # Changed to True by default
 
         self.setup_ui()
         self.add_player()
@@ -159,19 +157,18 @@ class WaitingRoom:
         self.player_count_label.pack(pady=5)
         
         # Current game mode indicator
-        self.mode_label = ttk.Label(main_frame, text="Mode: Stealing Disabled", font=("Arial", 10, "italic"))
+        self.mode_label = ttk.Label(main_frame, text="Mode: Stealing Enabled", font=("Arial", 10, "italic"))
         self.mode_label.pack(pady=5)
 
     def update_game_settings(self):
         """Update game settings when checkbox is toggled"""
-        global GAME_SETTINGS
-        GAME_SETTINGS["stealing_enabled"] = self.stealing_enabled.get()
+        stealing = self.stealing_enabled.get()
         
-        mode_text = "Mode: Stealing Enabled" if GAME_SETTINGS["stealing_enabled"] else "Mode: Stealing Disabled"
+        mode_text = f"Mode: {'Stealing Enabled' if stealing else 'Stealing Disabled'}"
         self.mode_label.config(text=mode_text)
         self.update_mode_description()
         
-        print(f"[SETTINGS] Stealing mode: {GAME_SETTINGS['stealing_enabled']}")
+        print(f"[SETTINGS] Stealing mode set to: {stealing}")
 
     def update_mode_description(self):
         """Update the game mode description based on stealing setting"""
@@ -257,15 +254,24 @@ class WaitingRoom:
     def save_game_settings(self):
         """Save game settings to a file that server/clients can read"""
         try:
+            stealing = self.stealing_enabled.get()
             with open("game_settings.txt", "w") as f:
-                f.write(f"stealing_enabled={self.stealing_enabled.get()}")
-            print(f"[SETTINGS] Saved to file: stealing_enabled={self.stealing_enabled.get()}")
+                f.write(f"stealing_enabled={1 if stealing else 0}")
+            print(f"[SETTINGS] Saved to file: stealing_enabled={stealing}")
+            
+            # Also set environment variable for clients
+            os.environ["STEALING_ENABLED"] = "1" if stealing else "0"
+            
+            # Force flush to disk
+            import os
+            os.fsync(f.fileno())
+            
         except Exception as e:
             print(f"[SETTINGS] Error saving settings: {e}")
 
     def launch_client(self, pid):
         try:
-            # Pass settings to client via command line or environment
+            # Pass settings to client via environment
             env = os.environ.copy()
             env["STEALING_ENABLED"] = "1" if self.stealing_enabled.get() else "0"
             
@@ -279,11 +285,10 @@ class WaitingRoom:
             self.root.after(2000, self.update_ui_loop)
 
     def on_closing(self):
-        global _waiting_room_instance, GAME_SETTINGS
+        global _waiting_room_instance
         
         if _waiting_room_instance == self:
             _waiting_room_instance = None
-            GAME_SETTINGS["stealing_enabled"] = False  # Reset
         
         self.root.destroy()
 

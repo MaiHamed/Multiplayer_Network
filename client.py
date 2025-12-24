@@ -50,8 +50,9 @@ class GameClient:
         self.game_active = False
         self.waiting_for_game = True
         self.game_start_time = None
-        self.stealing_enabled = self._load_stealing_setting()
-        self.game_duration = 60 if self.stealing_enabled else 9999  # Long time for non-stealing
+        # Load stealing setting - will be updated when game starts
+        self.stealing_enabled = False  # Start as False, will be updated
+        self.game_duration = 120
         self._game_over_handled = False
         self.final_scores = []
 
@@ -59,6 +60,7 @@ class GameClient:
         self.local_grid = [[0]*20 for _ in range(20)]
         self.claimed_cells = set()
         self.active_players = set()
+        self.pending_claims = set()  # Track pending claims to revert if rejected
 
         # Statistics
         self.stats = {'sent':0, 'received':0, 'dropped':0, 'retransmissions':0, 'latency_sum':0, 'latency_count':0}
@@ -81,25 +83,30 @@ class GameClient:
         self.gui.update_player_info("Waiting...", True)
 
     def _load_stealing_setting(self):
-        """Load stealing setting from environment or file"""
-        # Try environment variable first (set by waiting room)
-        stealing_env = os.environ.get("STEALING_ENABLED", "0")
-        if stealing_env == "1":
-            print("[CLIENT] Stealing mode enabled from environment")
-            return True
+        """Load stealing setting from file - should match server's setting"""
+        # Try multiple times to read the file (it might be created after client starts)
+        for attempt in range(5):
+            try:
+                if os.path.exists("game_settings.txt"):
+                    with open("game_settings.txt", "r") as f:
+                        content = f.read().strip()
+                        print(f"[CLIENT] Read settings file (attempt {attempt+1}): '{content}'")
+                        if "stealing_enabled=1" in content:
+                            print("[CLIENT] Stealing mode enabled from file")
+                            return True
+                        elif "stealing_enabled=0" in content:
+                            print("[CLIENT] Stealing mode disabled from file")
+                            return False
+                else:
+                    print(f"[CLIENT] No settings file found (attempt {attempt+1})")
+            except Exception as e:
+                print(f"[CLIENT] Error reading settings file (attempt {attempt+1}): {e}")
+            
+            # Wait a bit before retrying
+            time.sleep(0.5)
         
-        # Try to read from settings file
-        try:
-            if os.path.exists("game_settings.txt"):
-                with open("game_settings.txt", "r") as f:
-                    content = f.read()
-                    if "stealing_enabled=1" in content:
-                        print("[CLIENT] Stealing mode enabled from file")
-                        return True
-        except:
-            pass
-        
-        print("[CLIENT] Stealing mode disabled (default)")
+        # Default to conservative (disabled) if can't read file
+        print("[CLIENT] Could not read settings file, defaulting to non-stealing mode")
         return False
     
     def on_cell_click(self, row, col):
@@ -116,17 +123,22 @@ class GameClient:
         if not self.stealing_enabled:
             # STEALING DISABLED: Check if cell is already claimed by ANY player
             if current_owner != 0:
-                self.gui.log_message(f"Cell ({row},{col}) is already owned by Player {current_owner}. Cannot steal!", "warning")
-                return
+                self.gui.log_message(f"Cell ({row},{col}) is already owned by Player {current_owner}. Cannot steal in non-stealing mode!", "warning")
+                self.gui.highlight_cell(row, col)  # Briefly highlight to show ownership
+                return  # ⬅️ NO optimistic update!
         else:
             # STEALING ENABLED: Only prevent claiming your own cells
             if current_owner == self.player_id:
                 self.gui.log_message(f"You already own cell ({row},{col})!", "warning")
                 return
         
-        # OPTIMISTIC UPDATE: Immediately update local grid and GUI with player color
+        # If we get here, the claim should be valid
+        old_owner = current_owner
+        
+        # Do optimistic update
         self.local_grid[row][col] = self.player_id
         self.claimed_cells.add((row, col))
+        self.pending_claims.add((row, col))  # Track pending claim
         
         # Update GUI to show player color immediately
         self.gui.update_grid(self.local_grid)
@@ -136,9 +148,8 @@ class GameClient:
             self.gui.log_message(f"Request to claim ({row},{col}) sent.", "claim")
         else:
             # If send failed, revert the optimistic update
-            self.local_grid[row][col] = current_owner  # Revert to previous owner
-            self.claimed_cells.discard((row, col))
-            self.gui.update_grid(self.local_grid)
+            self._revert_optimistic_update(row, col, old_owner)
+    
     # ==================== SR ARQ SENDER ====================
     def _sr_send(self, msg_type, payload=b''):
         if self.nextSeqNum < self.base + self.N:
@@ -410,6 +421,9 @@ class GameClient:
                 print(f"[WARNING] Received different Player ID: {new_player_id}, already have: {self.player_id}")
 
         elif msg_type == MSG_TYPE_GAME_START:
+            # Update stealing setting when game starts (file should be written by now)
+            self.stealing_enabled = self._load_stealing_setting()
+            
             self.game_active = True
             self.waiting_for_game = False
             self.game_start_time = time.time()
@@ -417,8 +431,10 @@ class GameClient:
             # Show game mode message
             if self.stealing_enabled:
                 self.gui.log_message("GAME STARTED! 🎮 (Stealing Mode - 60 second timer)", "success")
+                print(f"[CLIENT {self.player_id}] Game started in STEALING mode")
             else:
                 self.gui.log_message("GAME STARTED! 🎮 (Non-Stealing Mode - Ends when all cells claimed)", "success")
+                print(f"[CLIENT {self.player_id}] Game started in NON-STEALING mode")
                 
             self.gui.update_player_info(f"Player {self.player_id} (Playing)", True)
             self._start_game_timer()
@@ -462,6 +478,11 @@ class GameClient:
                         
                     # Unpack snapshot from server
                     grid = unpack_grid_snapshot(grid_payload)
+                    
+                    # Clear pending claims when we receive a snapshot (server has processed them)
+                    self.pending_claims.clear()
+                    
+                    # Update local grid with server's authoritative state
                     self.local_grid = [row[:] for row in grid]
 
                     # Determine ALL active players from snapshot
@@ -536,6 +557,15 @@ class GameClient:
         except Exception as e:
             self.gui.log_message(f"Claim preparation error: {e}", "error")
             return False
+    
+    def _revert_optimistic_update(self, row, col, old_owner):
+        """Revert optimistic update if claim fails"""
+        if (row, col) in self.pending_claims:
+            self.local_grid[row][col] = old_owner
+            self.claimed_cells.discard((row, col))
+            self.pending_claims.discard((row, col))
+            self.gui.update_grid(self.local_grid)
+            self.gui.log_message(f"Claim at ({row},{col}) failed, reverted to previous state", "warning")
     
     def _start_game_timer(self):
         if not self.game_active or not self.game_start_time:

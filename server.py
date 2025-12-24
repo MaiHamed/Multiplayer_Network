@@ -58,9 +58,9 @@ class GameServer:
         self.running = False
         self.grid_changed = False
         self._should_send_snapshots = False  # Control flag for snapshots
-        self.game_duration = 60  # 60 seconds game duration for stealing mode
+        self.game_duration = 120 # 120 seconds game duration for stealing mode
         self.game_start_time = None
-        self.stealing_enabled = self._load_stealing_setting()
+        self.stealing_enabled = False  # Will be loaded when game starts
         self.total_cells = 20 * 20
         self.claimed_cells_count = 0  # Track claimed cells for non-stealing mode
 
@@ -556,6 +556,11 @@ class GameServer:
                                 # Update GUI
                                 self.gui.update_grid(self.grid_state)
 
+                                # ✅ CRITICAL FIX: Send snapshot IMMEDIATELY after successful claim/steal
+                                # This ensures ALL clients see the updated grid right away
+                                print(f"[STEAL] Player {player_id} stole cell ({r},{c}) from Player {old_owner}, sending immediate snapshot")
+                                self._send_snapshot()
+
                             else:
                                 # Late / outdated claim — ignore
                                 self.gui.log_message(
@@ -621,19 +626,26 @@ class GameServer:
 
     # ==================== Helper ====================
     def _load_stealing_setting(self):
-        """Load stealing setting from file"""
+        """Load stealing setting from file - called dynamically when needed"""
         try:
             if os.path.exists("game_settings.txt"):
                 with open("game_settings.txt", "r") as f:
-                    content = f.read()
+                    content = f.read().strip()
+                    print(f"[SERVER] Read settings file content: '{content}'")
                     if "stealing_enabled=1" in content:
                         print("[SERVER] Stealing mode enabled from file")
                         return True
+                    elif "stealing_enabled=0" in content:
+                        print("[SERVER] Stealing mode disabled from file")
+                        return False
+            else:
+                print("[SERVER] No game_settings.txt file found, using default (disabled)")
         except Exception as e:
             print(f"[SERVER] Error loading settings: {e}")
         
-        print("[SERVER] Stealing mode disabled (default)")
-        return False
+        # FOR TESTING: Enable stealing by default
+        print("[SERVER] Stealing mode ENABLED for testing")
+        return True
     
     def _addr_to_pid(self, addr):
         """Return pid for an address (search active clients then waiting room)."""
@@ -828,6 +840,7 @@ class GameServer:
                 self.recent_snapshots.pop(0)
 
             sent_count = 0
+            print(f"[SNAPSHOT] Sending to players: {list(self.clients.keys())}")
             for pid in list(self.clients.keys()):
                 sent = self._sr_send(pid, MSG_TYPE_BOARD_SNAPSHOT, payload)
                 if sent:
@@ -877,6 +890,9 @@ class GameServer:
             time.sleep(1)
     
     def _start_game(self):
+        # Load stealing setting at game start (not server start)
+        self.stealing_enabled = self._load_stealing_setting()
+        
         self.game_active = True
         self._should_send_snapshots = True
         self.game_start_time = time.time()  # Track when game started
@@ -1023,6 +1039,7 @@ class GameServer:
         self.game_active = False
         self._should_send_snapshots = False
         self.game_start_time = None
+        self.stealing_enabled = False  # Reset stealing setting
         
         # Clear all players
         self.clients.clear()
